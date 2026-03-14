@@ -5,6 +5,9 @@ BUILD_DIR=./bin
 MIGRATIONS_DIR=./migrations
 DATABASE_URL?=postgres://cortex:cortex@localhost:5432/cortex_sync?sslmode=disable
 
+-include .env.local
+export
+
 build:
 	go build -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/server
 

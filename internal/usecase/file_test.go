@@ -23,6 +23,8 @@ type fileTestDeps struct {
 	latest    *fake.FileLatestRepository
 	events    *fake.SyncEventRepository
 	members   *fake.VaultMemberRepository
+	users     *fake.UserRepository
+	devices   *fake.DeviceRepository
 	blobs     *fake.BlobStorage
 	uc        *usecase.FileUsecase
 }
@@ -33,9 +35,11 @@ func setupFileTest() *fileTestDeps {
 	latest := fake.NewFileLatestRepository()
 	events := fake.NewSyncEventRepository()
 	members := fake.NewVaultMemberRepository()
+	users := fake.NewUserRepository()
+	devices := fake.NewDeviceRepository()
 	blobs := fake.NewBlobStorage()
 
-	uc := usecase.NewFileUsecase(snapshots, deltas, latest, events, members, blobs, fake.NewTransactor())
+	uc := usecase.NewFileUsecase(snapshots, deltas, latest, events, members, users, devices, blobs, fake.NewTransactor())
 
 	return &fileTestDeps{
 		snapshots: snapshots,
@@ -43,6 +47,8 @@ func setupFileTest() *fileTestDeps {
 		latest:    latest,
 		events:    events,
 		members:   members,
+		users:     users,
+		devices:   devices,
 		blobs:     blobs,
 		uc:        uc,
 	}
@@ -902,8 +908,8 @@ func TestFileUsecase_MultiUserAttribution(t *testing.T) {
 	history, err := deps.uc.GetHistory(context.Background(), user1, vaultID, "notes/shared.md")
 	require.NoError(t, err)
 	assert.Len(t, history, 2)
-	assert.Equal(t, user1, history[0].CreatedBy)
-	assert.Equal(t, user2, history[1].CreatedBy)
+	assert.Equal(t, user1, history[0].AuthorID)
+	assert.Equal(t, user2, history[1].AuthorID)
 }
 
 func TestFileUsecase_EditorCanUpload(t *testing.T) {

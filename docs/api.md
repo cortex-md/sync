@@ -951,8 +951,10 @@ Fetch metadata for multiple files in a single request. Useful for initial sync t
     "version": 1,
     "size_bytes": 1024,
     "checksum": "string",
-    "created_by": "uuid",
+    "author_id": "uuid",
+    "author_name": "string",
     "device_id": "uuid",
+    "device_name": "string",
     "created_at": "2006-01-02T15:04:05Z07:00"
   }
 ]

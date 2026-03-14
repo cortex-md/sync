@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"time"
 
 	"github.com/spf13/viper"
@@ -82,6 +83,7 @@ func Load() (*Config, error) {
 	v.AddConfigPath("/etc/cortex-sync/")
 
 	v.SetEnvPrefix("CORTEX")
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
 
 	setDefaults(v)

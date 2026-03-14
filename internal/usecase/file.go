@@ -20,6 +20,8 @@ type FileUsecase struct {
 	latest              port.FileLatestRepository
 	events              port.SyncEventRepository
 	members             port.VaultMemberRepository
+	users               port.UserRepository
+	devices             port.DeviceRepository
 	blobs               port.BlobStorage
 	broker              port.SSEBroker
 	tx                  port.Transactor
@@ -46,6 +48,8 @@ func NewFileUsecase(
 	latest port.FileLatestRepository,
 	events port.SyncEventRepository,
 	members port.VaultMemberRepository,
+	users port.UserRepository,
+	devices port.DeviceRepository,
 	blobs port.BlobStorage,
 	tx port.Transactor,
 ) *FileUsecase {
@@ -55,6 +59,8 @@ func NewFileUsecase(
 		latest:      latest,
 		events:      events,
 		members:     members,
+		users:       users,
+		devices:     devices,
 		blobs:       blobs,
 		tx:          tx,
 		deltaPolicy: DefaultDeltaPolicy(),
@@ -618,8 +624,10 @@ type HistoryEntry struct {
 	Version    int
 	SizeBytes  int64
 	Checksum   string
-	CreatedBy  uuid.UUID
+	AuthorID   uuid.UUID
+	AuthorName string
 	DeviceID   uuid.UUID
+	DeviceName string
 	CreatedAt  time.Time
 }
 
@@ -639,15 +647,25 @@ func (uc *FileUsecase) GetHistory(ctx context.Context, userID uuid.UUID, vaultID
 
 	result := make([]HistoryEntry, 0, len(snapshots))
 	for _, s := range snapshots {
-		result = append(result, HistoryEntry{
+		entry := HistoryEntry{
 			SnapshotID: s.ID,
 			Version:    s.Version,
 			SizeBytes:  s.SizeBytes,
 			Checksum:   s.Checksum,
-			CreatedBy:  s.CreatedBy,
+			AuthorID:   s.CreatedBy,
 			DeviceID:   s.DeviceID,
 			CreatedAt:  s.CreatedAt,
-		})
+		}
+
+		if author, userErr := uc.users.GetByID(ctx, s.CreatedBy); userErr == nil {
+			entry.AuthorName = author.DisplayName
+		}
+
+		if device, deviceErr := uc.devices.GetByID(ctx, s.DeviceID); deviceErr == nil {
+			entry.DeviceName = device.DeviceName
+		}
+
+		result = append(result, entry)
 	}
 
 	return result, nil

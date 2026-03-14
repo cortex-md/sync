@@ -50,7 +50,7 @@ func newFileTestHarness() *fileTestHarness {
 	authUC := usecase.NewAuthUsecase(userRepo, deviceRepo, refreshTokenRepo, hasher, tokenGen, 90*24*time.Hour)
 	vaultUC := usecase.NewVaultUsecase(vaultRepo, memberRepo, keyRepo, inviteRepo, fake.NewTransactor())
 	inviteUC := usecase.NewVaultInviteUsecase(inviteRepo, memberRepo, keyRepo, userRepo, vaultRepo, fake.NewTransactor())
-	fileUC := usecase.NewFileUsecase(snapshotRepo, deltaRepo, latestRepo, eventRepo, memberRepo, blobStorage, fake.NewTransactor())
+	fileUC := usecase.NewFileUsecase(snapshotRepo, deltaRepo, latestRepo, eventRepo, memberRepo, userRepo, deviceRepo, blobStorage, fake.NewTransactor())
 
 	authHandler := handler.NewAuthHandler(authUC)
 	vaultHandler := handler.NewVaultHandler(vaultUC)
@@ -687,6 +687,12 @@ func TestFileHandler_GetHistory_Success(t *testing.T) {
 	var entries []map[string]any
 	json.NewDecoder(rec.Body).Decode(&entries)
 	assert.Len(t, entries, 3)
+
+	entry := entries[0]
+	assert.NotEmpty(t, entry["author_id"])
+	assert.Equal(t, "Test User", entry["author_name"])
+	assert.NotEmpty(t, entry["device_id"])
+	assert.Equal(t, "Test Device", entry["device_name"])
 }
 
 func TestFileHandler_GetHistory_Empty(t *testing.T) {

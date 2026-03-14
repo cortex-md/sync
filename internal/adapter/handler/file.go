@@ -374,8 +374,10 @@ type historyEntryResponse struct {
 	Version    int    `json:"version"`
 	SizeBytes  int64  `json:"size_bytes"`
 	Checksum   string `json:"checksum"`
-	CreatedBy  string `json:"created_by"`
+	AuthorID   string `json:"author_id"`
+	AuthorName string `json:"author_name"`
 	DeviceID   string `json:"device_id"`
+	DeviceName string `json:"device_name"`
 	CreatedAt  string `json:"created_at"`
 }
 
@@ -411,8 +413,10 @@ func (h *FileHandler) GetHistory(w http.ResponseWriter, r *http.Request) {
 			Version:    e.Version,
 			SizeBytes:  e.SizeBytes,
 			Checksum:   e.Checksum,
-			CreatedBy:  e.CreatedBy.String(),
+			AuthorID:   e.AuthorID.String(),
+			AuthorName: e.AuthorName,
 			DeviceID:   e.DeviceID.String(),
+			DeviceName: e.DeviceName,
 			CreatedAt:  e.CreatedAt.Format(time.RFC3339),
 		})
 	}

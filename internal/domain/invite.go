@@ -25,3 +25,10 @@ type VaultKey struct {
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }
+
+type VaultEncryption struct {
+	VaultID      uuid.UUID
+	Salt         []byte
+	EncryptedVEK []byte
+	CreatedAt    time.Time
+}

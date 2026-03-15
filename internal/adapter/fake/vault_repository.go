@@ -301,3 +301,33 @@ func (r *VaultKeyRepository) Delete(_ context.Context, vaultID, userID uuid.UUID
 	delete(r.keys, key)
 	return nil
 }
+
+type VaultEncryptionRepository struct {
+	mu          sync.RWMutex
+	encryptions map[uuid.UUID]*domain.VaultEncryption
+}
+
+func NewVaultEncryptionRepository() *VaultEncryptionRepository {
+	return &VaultEncryptionRepository{
+		encryptions: make(map[uuid.UUID]*domain.VaultEncryption),
+	}
+}
+
+func (r *VaultEncryptionRepository) Upsert(_ context.Context, enc *domain.VaultEncryption) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	stored := *enc
+	r.encryptions[enc.VaultID] = &stored
+	return nil
+}
+
+func (r *VaultEncryptionRepository) GetByVaultID(_ context.Context, vaultID uuid.UUID) (*domain.VaultEncryption, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	enc, exists := r.encryptions[vaultID]
+	if !exists {
+		return nil, domain.ErrNotFound
+	}
+	result := *enc
+	return &result, nil
+}

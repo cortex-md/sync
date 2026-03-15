@@ -75,6 +75,11 @@ type VaultKeyRepository interface {
 	Delete(ctx context.Context, vaultID, userID uuid.UUID) error
 }
 
+type VaultEncryptionRepository interface {
+	Upsert(ctx context.Context, enc *domain.VaultEncryption) error
+	GetByVaultID(ctx context.Context, vaultID uuid.UUID) (*domain.VaultEncryption, error)
+}
+
 type FileSnapshotRepository interface {
 	Create(ctx context.Context, snapshot *domain.FileSnapshot) error
 	GetByID(ctx context.Context, id uuid.UUID) (*domain.FileSnapshot, error)

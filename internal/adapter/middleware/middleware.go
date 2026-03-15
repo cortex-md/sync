@@ -2,6 +2,8 @@ package middleware
 
 import (
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,13 +31,33 @@ func Logger(next http.Handler) http.Handler {
 		ww := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(ww, r)
 		duration := time.Since(start)
-		zerolog.Ctx(r.Context()).Info().
+
+		logEvent := zerolog.Ctx(r.Context()).Info()
+		var msg = "request completed"
+
+		if !strings.Contains(strconv.Itoa(ww.statusCode), "20") {
+			msg = "request failed"
+			if ww.statusCode >= 500 {
+				logEvent = zerolog.Ctx(r.Context()).Error()
+			} else {
+				logEvent = zerolog.Ctx(r.Context()).Warn()
+			}
+			logEvent = logEvent.
+				Str("query", r.URL.RawQuery).
+				Str("remote_addr", r.RemoteAddr).
+				Str("user_agent", r.UserAgent())
+			if len(ww.body) > 0 {
+				logEvent = logEvent.Str("response_body", string(ww.body))
+			}
+		}
+
+		logEvent.
 			Str("method", r.Method).
 			Str("path", r.URL.Path).
 			Int("status", ww.statusCode).
 			Dur("duration", duration).
 			Int("bytes", ww.bytesWritten).
-			Msg("request completed")
+			Msg(msg)
 	})
 }
 
@@ -57,6 +79,7 @@ type responseWriter struct {
 	http.ResponseWriter
 	statusCode   int
 	bytesWritten int
+	body         []byte
 }
 
 func (rw *responseWriter) WriteHeader(code int) {
@@ -67,5 +90,8 @@ func (rw *responseWriter) WriteHeader(code int) {
 func (rw *responseWriter) Write(b []byte) (int, error) {
 	n, err := rw.ResponseWriter.Write(b)
 	rw.bytesWritten += n
+	if rw.statusCode >= 400 && len(rw.body) < 1024 {
+		rw.body = append(rw.body, b...)
+	}
 	return n, err
 }

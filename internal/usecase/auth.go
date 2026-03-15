@@ -143,12 +143,18 @@ func (uc *AuthUsecase) Login(ctx context.Context, input LoginInput) (*LoginOutpu
 		}
 	} else {
 		if device.Revoked {
-			return nil, domain.ErrDeviceRevoked
+			device.Revoked = false
 		}
 		if device.UserID != user.ID {
-			return nil, domain.ErrInvalidCredentials
+			if err := uc.refreshTokens.RevokeAllByDeviceID(ctx, device.ID); err != nil {
+				return nil, err
+			}
+			device.UserID = user.ID
 		}
-		if err := uc.devices.UpdateLastSeen(ctx, device.ID); err != nil {
+		device.DeviceName = input.DeviceName
+		device.DeviceType = input.DeviceType
+		device.LastSeenAt = time.Now()
+		if err := uc.devices.Update(ctx, device); err != nil {
 			return nil, err
 		}
 	}

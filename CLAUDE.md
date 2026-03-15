@@ -170,7 +170,7 @@ All config via environment variables with `CORTEX_` prefix, or `config.yaml` fil
 
 PostgreSQL 16. Schema in `migrations/000001_initial_schema.up.sql`.
 
-12 tables: `users`, `devices`, `refresh_tokens`, `vaults`, `vault_members`, `vault_invites`, `vault_keys`, `file_snapshots`, `file_deltas`, `file_latest`, `sync_events`.
+13 tables: `users`, `devices`, `refresh_tokens`, `vaults`, `vault_members`, `vault_invites`, `vault_keys`, `vault_encryption`, `file_snapshots`, `file_deltas`, `file_latest`, `sync_events`.
 
 PG NOTIFY trigger on `sync_events` insert for real-time event propagation.
 
@@ -186,7 +186,8 @@ PG NOTIFY trigger on `sync_events` insert for real-time event propagation.
   - Awareness relay (cursor/presence) without persistence
   - REST presence endpoint (`GET /sync/v1/vaults/{vaultID}/collab/peers`)
   - Config-driven `MaxPeersPerRoom` and `FlushInterval`
-- All 12 repository interfaces implemented in `adapter/postgres/` using pgx/v5
+- Vault encryption endpoints (GET/POST `/sync/v1/vaults/{vaultID}/encryption`) for E2E encryption key management
+- All 13 repository interfaces implemented in `adapter/postgres/` using pgx/v5
 - S3/MinIO blob storage implemented in `adapter/s3/` using minio-go/v7
 - PG NOTIFY listener in `adapter/postgres/listener.go` bridges DB events to SSE broker
 - `main.go` wires real or fake repos based on `CORTEX_USE_FAKE_REPOS` env var (default: real)

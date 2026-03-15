@@ -50,6 +50,7 @@ func main() {
 		memberRepo       port.VaultMemberRepository
 		inviteRepo       port.VaultInviteRepository
 		keyRepo          port.VaultKeyRepository
+		encryptionRepo   port.VaultEncryptionRepository
 		snapshotRepo     port.FileSnapshotRepository
 		deltaRepo        port.FileDeltaRepository
 		latestRepo       port.FileLatestRepository
@@ -71,6 +72,7 @@ func main() {
 		memberRepo = fake.NewVaultMemberRepository()
 		inviteRepo = fake.NewVaultInviteRepository()
 		keyRepo = fake.NewVaultKeyRepository()
+		encryptionRepo = fake.NewVaultEncryptionRepository()
 		snapshotRepo = fake.NewFileSnapshotRepository()
 		deltaRepo = fake.NewFileDeltaRepository()
 		latestRepo = fake.NewFileLatestRepository()
@@ -93,6 +95,7 @@ func main() {
 		memberRepo = pgadapter.NewVaultMemberRepository(dbPool)
 		inviteRepo = pgadapter.NewVaultInviteRepository(dbPool)
 		keyRepo = pgadapter.NewVaultKeyRepository(dbPool)
+		encryptionRepo = pgadapter.NewVaultEncryptionRepository(dbPool)
 		snapshotRepo = pgadapter.NewFileSnapshotRepository(dbPool)
 		deltaRepo = pgadapter.NewFileDeltaRepository(dbPool)
 		latestRepo = pgadapter.NewFileLatestRepository(dbPool)
@@ -113,6 +116,7 @@ func main() {
 	vaultUC := usecase.NewVaultUsecase(vaultRepo, memberRepo, keyRepo, inviteRepo, tx)
 	memberUC := usecase.NewVaultMemberUsecase(memberRepo, keyRepo, userRepo)
 	inviteUC := usecase.NewVaultInviteUsecase(inviteRepo, memberRepo, keyRepo, userRepo, vaultRepo, tx)
+	encryptionUC := usecase.NewVaultEncryptionUsecase(encryptionRepo, memberRepo)
 	fileUC := usecase.NewFileUsecase(snapshotRepo, deltaRepo, latestRepo, eventRepo, memberRepo, userRepo, deviceRepo, blobStorage, tx)
 	fileUC.SetDeltaPolicy(usecase.DeltaPolicy{
 		MaxDeltasBeforeSnapshot: cfg.Sync.MaxDeltasBeforeSnapshot,
@@ -141,6 +145,7 @@ func main() {
 	inviteHandler := handler.NewVaultInviteHandler(inviteUC)
 	fileHandler := handler.NewFileHandler(fileUC)
 	sseHandler := handler.NewSSEHandler(broker, eventRepo, memberRepo)
+	encryptionHandler := handler.NewVaultEncryptionHandler(encryptionUC)
 	collabHandler := handler.NewCollabHandler(collabBroker, collabRepo, memberRepo, tokenGen, broker, cfg.Collab.FlushInterval)
 
 	r := chi.NewRouter()
@@ -224,6 +229,8 @@ func main() {
 			r.Get("/changes", fileHandler.ListChanges)
 			r.Get("/events", sseHandler.Events)
 			r.Get("/collab/peers", collabHandler.GetPeers)
+			r.Get("/encryption", encryptionHandler.Get)
+			r.Post("/encryption", encryptionHandler.Create)
 		})
 	})
 

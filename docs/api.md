@@ -608,6 +608,77 @@ Returns pending invites for the authenticated user's email.
 
 ---
 
+## Vault Encryption
+
+Endpoints for managing vault-level E2E encryption keys. The server stores an encrypted VEK (Vault Encryption Key) and the salt used to derive the wrapping key from the user's password. The server never sees the plaintext VEK.
+
+All endpoints require authentication. Base path: `/sync/v1/vaults/{vaultID}`
+
+### GET /sync/v1/vaults/{vaultID}/encryption
+
+Check if a vault has an encryption key set up, and retrieve the encrypted key data.
+
+**URL Params**: `vaultID` (uuid)
+
+**Response** `200`
+
+```json
+{
+  "has_key": true,
+  "salt": "base64-encoded-salt",
+  "encrypted_vek": "base64-encoded-encrypted-vek"
+}
+```
+
+When no encryption key exists:
+
+```json
+{
+  "has_key": false
+}
+```
+
+**Errors**
+
+| Status | Condition |
+|--------|-----------|
+| 400 | Invalid vault ID |
+| 401 | Unauthorized |
+| 403 | Not a member of this vault |
+
+### POST /sync/v1/vaults/{vaultID}/encryption
+
+Create or update the vault encryption key. The client generates a random VEK, derives a wrapping key from the user's password via Argon2id, encrypts the VEK, and sends the salt + encrypted VEK to the server.
+
+**URL Params**: `vaultID` (uuid)
+
+**Request Body**
+
+```json
+{
+  "salt": "base64-encoded-salt",
+  "encrypted_vek": "base64-encoded-encrypted-vek"
+}
+```
+
+**Response** `201`
+
+```json
+{
+  "status": "created"
+}
+```
+
+**Errors**
+
+| Status | Condition |
+|--------|-----------|
+| 400 | Invalid vault ID, invalid base64, or missing fields |
+| 401 | Unauthorized |
+| 403 | Not a member of this vault |
+
+---
+
 ## File Sync
 
 All endpoints require authentication. Base path: `/sync/v1/vaults/{vaultID}`

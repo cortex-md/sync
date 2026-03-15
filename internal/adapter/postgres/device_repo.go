@@ -99,9 +99,9 @@ func (r *DeviceRepository) Revoke(ctx context.Context, id uuid.UUID) error {
 
 func (r *DeviceRepository) Update(ctx context.Context, device *domain.Device) error {
 	tag, err := r.pool.Exec(ctx,
-		`UPDATE devices SET device_name = $1, device_type = $2, device_token = $3, last_seen_at = $4, revoked = $5
-		 WHERE id = $6`,
-		device.DeviceName, device.DeviceType, device.DeviceToken, device.LastSeenAt, device.Revoked, device.ID,
+		`UPDATE devices SET user_id = $1, device_name = $2, device_type = $3, device_token = $4, last_seen_at = $5, revoked = $6
+		 WHERE id = $7`,
+		device.UserID, device.DeviceName, device.DeviceType, device.DeviceToken, device.LastSeenAt, device.Revoked, device.ID,
 	)
 	if err != nil {
 		return mapError(err)

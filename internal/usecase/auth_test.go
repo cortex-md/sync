@@ -128,7 +128,7 @@ func TestLogin_NonExistentUser(t *testing.T) {
 	assert.ErrorIs(t, err, domain.ErrInvalidCredentials)
 }
 
-func TestLogin_RevokedDevice(t *testing.T) {
+func TestLogin_RevokedDeviceReactivated(t *testing.T) {
 	uc, _, deviceRepo, _ := newTestAuthUsecase()
 
 	_, err := uc.Register(context.Background(), usecase.RegisterInput{
@@ -148,12 +148,55 @@ func TestLogin_RevokedDevice(t *testing.T) {
 	err = deviceRepo.Revoke(context.Background(), deviceID)
 	require.NoError(t, err)
 
-	_, err = uc.Login(context.Background(), usecase.LoginInput{
+	out, err := uc.Login(context.Background(), usecase.LoginInput{
 		Email:    "test@example.com",
 		Password: "password123",
 		DeviceID: deviceID,
 	})
-	assert.ErrorIs(t, err, domain.ErrDeviceRevoked)
+	require.NoError(t, err)
+	assert.NotEmpty(t, out.AccessToken)
+
+	device, err := deviceRepo.GetByID(context.Background(), deviceID)
+	require.NoError(t, err)
+	assert.False(t, device.Revoked)
+}
+
+func TestLogin_DeviceReassignedToNewUser(t *testing.T) {
+	uc, _, deviceRepo, _ := newTestAuthUsecase()
+
+	regA, err := uc.Register(context.Background(), usecase.RegisterInput{
+		Email:    "userA@example.com",
+		Password: "password123",
+	})
+	require.NoError(t, err)
+
+	regB, err := uc.Register(context.Background(), usecase.RegisterInput{
+		Email:    "userB@example.com",
+		Password: "password456",
+	})
+	require.NoError(t, err)
+
+	deviceID := uuid.New()
+	_, err = uc.Login(context.Background(), usecase.LoginInput{
+		Email:    "userA@example.com",
+		Password: "password123",
+		DeviceID: deviceID,
+	})
+	require.NoError(t, err)
+
+	outB, err := uc.Login(context.Background(), usecase.LoginInput{
+		Email:    "userB@example.com",
+		Password: "password456",
+		DeviceID: deviceID,
+	})
+	require.NoError(t, err)
+	assert.NotEmpty(t, outB.AccessToken)
+	assert.Equal(t, regB.User.ID, outB.User.ID)
+
+	device, err := deviceRepo.GetByID(context.Background(), deviceID)
+	require.NoError(t, err)
+	assert.Equal(t, regB.User.ID, device.UserID)
+	assert.NotEqual(t, regA.User.ID, device.UserID)
 }
 
 func TestLogin_SameDeviceReturnsNewTokens(t *testing.T) {

@@ -95,3 +95,13 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 	}
 	return n, err
 }
+
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (rw *responseWriter) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
+}

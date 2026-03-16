@@ -32,6 +32,7 @@ type vaultResponse struct {
 	Description string `json:"description"`
 	OwnerID     string `json:"owner_id"`
 	Role        string `json:"role"`
+	MemberCount int    `json:"member_count"`
 	CreatedAt   string `json:"created_at"`
 	UpdatedAt   string `json:"updated_at"`
 }
@@ -43,6 +44,7 @@ func toVaultResponse(v usecase.VaultInfo) vaultResponse {
 		Description: v.Description,
 		OwnerID:     v.OwnerID.String(),
 		Role:        string(v.Role),
+		MemberCount: v.MemberCount,
 		CreatedAt:   v.CreatedAt.Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:   v.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}

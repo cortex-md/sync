@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"github.com/cortexnotes/cortex-sync/internal/adapter/middleware"
+	"github.com/cortexnotes/cortex-sync/internal/domain"
 	"github.com/cortexnotes/cortex-sync/internal/port"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 )
 
 type SSEHandler struct {
@@ -54,7 +56,16 @@ func (h *SSEHandler) Events(w http.ResponseWriter, r *http.Request) {
 
 	_, err = h.members.GetByVaultAndUser(r.Context(), vaultID, claims.UserID)
 	if err != nil {
-		WriteError(w, http.StatusForbidden, "vault access denied")
+		log.Warn().
+			Str("vault_id", vaultID.String()).
+			Str("user_id", claims.UserID.String()).
+			Err(err).
+			Msg("SSE vault access check failed")
+		if err == domain.ErrNotFound {
+			WriteError(w, http.StatusForbidden, "vault access denied")
+		} else {
+			WriteError(w, http.StatusInternalServerError, "internal server error")
+		}
 		return
 	}
 

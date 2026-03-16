@@ -71,6 +71,9 @@ Clean Architecture with strict dependency direction: `domain` -> `port` -> `usec
 - Device identity via `X-Device-ID` header (UUID, client-generated, required for all authenticated endpoints)
 - Auth middleware extracts `AccessTokenClaims{UserID, Email}` into context
 - Device middleware extracts `X-Device-ID` into context
+- Device reassignment: when a different user logs in with an existing device_id, the device is reassigned to the new user (old refresh tokens for that device are revoked first)
+- Revoked devices are reactivated on successful login with valid credentials
+- Client clears device_id from keychain on logout; a fresh UUID is generated on next login
 
 ## E2E Encryption
 
@@ -115,7 +118,7 @@ Server is "dumb encrypted storage." It stores encrypted blobs and encrypted keys
 go test ./... -v -race -count=1
 ```
 
-- **337 total tests**, all passing with `-race`.
+- **406 total tests**, all passing with `-race`.
 - Usecase tests use fake repositories from `adapter/fake/`.
 - Handler tests use `httptest.NewRecorder` for standard HTTP and `httptest.NewServer` for SSE (long-lived streaming).
 - SSE handler tests use an `sseReader` struct pattern: single goroutine owns `bufio.Scanner`, sends parsed events to a channel.
@@ -192,6 +195,7 @@ PG NOTIFY trigger on `sync_events` insert for real-time event propagation.
 - PG NOTIFY listener in `adapter/postgres/listener.go` bridges DB events to SSE broker
 - `main.go` wires real or fake repos based on `CORTEX_USE_FAKE_REPOS` env var (default: real)
 - Error mapping: PG unique violation -> `ErrAlreadyExists`, no rows -> `ErrNotFound`, FK violation -> `ErrNotFound`
+- Logger middleware logs non-2xx responses with Warn (4xx) or Error (5xx) level, including query, remote_addr, user_agent, and up to 1KB of response body
 - No integration or E2E tests yet (only unit + handler tests with fake repos)
 
 ## API Reference

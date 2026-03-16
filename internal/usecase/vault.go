@@ -46,6 +46,7 @@ type VaultInfo struct {
 	Description string
 	OwnerID     uuid.UUID
 	Role        domain.VaultRole
+	MemberCount int
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }
@@ -121,12 +122,17 @@ func (uc *VaultUsecase) List(ctx context.Context, userID uuid.UUID) ([]VaultInfo
 		if err != nil {
 			continue
 		}
+		memberCount := 0
+		if members, err := uc.members.ListByVaultID(ctx, m.VaultID); err == nil {
+			memberCount = len(members)
+		}
 		result = append(result, VaultInfo{
 			ID:          vault.ID,
 			Name:        vault.Name,
 			Description: vault.Description,
 			OwnerID:     vault.OwnerID,
 			Role:        m.Role,
+			MemberCount: memberCount,
 			CreatedAt:   vault.CreatedAt,
 			UpdatedAt:   vault.UpdatedAt,
 		})

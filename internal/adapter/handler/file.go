@@ -271,6 +271,41 @@ func (h *FileHandler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (h *FileHandler) RestoreFile(w http.ResponseWriter, r *http.Request) {
+	claims := GetAuthClaims(r.Context())
+	if claims == nil {
+		WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	deviceID := GetDeviceID(r.Context())
+
+	vaultID, err := uuid.Parse(chi.URLParam(r, "vaultID"))
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid vault id")
+		return
+	}
+
+	filePath := r.URL.Query().Get("path")
+	if filePath == "" {
+		WriteError(w, http.StatusBadRequest, "missing path query parameter")
+		return
+	}
+
+	err = h.files.RestoreFile(r.Context(), usecase.RestoreFileInput{
+		UserID:   claims.UserID,
+		DeviceID: deviceID,
+		VaultID:  vaultID,
+		FilePath: filePath,
+	})
+	if err != nil {
+		handleFileError(w, err)
+		return
+	}
+
+	WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 type renameFileRequest struct {
 	OldPath string `json:"old_path"`
 	NewPath string `json:"new_path"`

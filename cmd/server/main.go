@@ -222,6 +222,7 @@ func main() {
 			r.Post("/files/deltas", fileHandler.UploadDelta)
 			r.Get("/files/deltas", fileHandler.DownloadDeltas)
 			r.Post("/files/rename", fileHandler.RenameFile)
+			r.Post("/files/restore", fileHandler.RestoreFile)
 			r.Post("/files/bulk", fileHandler.BulkGetFileInfo)
 			r.Get("/files/info", fileHandler.GetFileInfo)
 			r.Get("/files/list", fileHandler.ListFiles)

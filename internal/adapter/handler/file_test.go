@@ -82,6 +82,7 @@ func newFileTestHarness() *fileTestHarness {
 			r.Post("/files/deltas", fileHandler.UploadDelta)
 			r.Get("/files/deltas", fileHandler.DownloadDeltas)
 			r.Post("/files/rename", fileHandler.RenameFile)
+			r.Post("/files/restore", fileHandler.RestoreFile)
 			r.Post("/files/bulk", fileHandler.BulkGetFileInfo)
 			r.Get("/files/info", fileHandler.GetFileInfo)
 			r.Get("/files/list", fileHandler.ListFiles)
@@ -378,6 +379,59 @@ func TestFileHandler_DeleteFile_AlreadyDeleted(t *testing.T) {
 
 	rec = doRawRequest(h, "DELETE", "/sync/v1/vaults/"+vaultID+"/files?path=notes/hello.md", nil, headers)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestFileHandler_RestoreFile_Success(t *testing.T) {
+	h := newFileTestHarness()
+	accessToken, deviceID := fileRegisterAndLogin(t, h, "user@example.com", "password123")
+	vaultID := fileCreateVault(t, h, accessToken, deviceID, "Test Vault")
+
+	uploadSnapshot(t, h, accessToken, deviceID, vaultID, "notes/hello.md", []byte("content"))
+
+	headers := fileAuthHeaders(accessToken, deviceID)
+	rec := doRawRequest(h, "DELETE", "/sync/v1/vaults/"+vaultID+"/files?path=notes/hello.md", nil, headers)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	rec = doRawRequest(h, "POST", "/sync/v1/vaults/"+vaultID+"/files/restore?path=notes/hello.md", nil, headers)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rec = doRawRequest(h, "GET", "/sync/v1/vaults/"+vaultID+"/files/info?path=notes/hello.md", nil, headers)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var info map[string]any
+	json.NewDecoder(rec.Body).Decode(&info)
+	assert.Equal(t, false, info["deleted"])
+}
+
+func TestFileHandler_RestoreFile_NotDeleted(t *testing.T) {
+	h := newFileTestHarness()
+	accessToken, deviceID := fileRegisterAndLogin(t, h, "user@example.com", "password123")
+	vaultID := fileCreateVault(t, h, accessToken, deviceID, "Test Vault")
+
+	uploadSnapshot(t, h, accessToken, deviceID, vaultID, "notes/hello.md", []byte("content"))
+
+	headers := fileAuthHeaders(accessToken, deviceID)
+	rec := doRawRequest(h, "POST", "/sync/v1/vaults/"+vaultID+"/files/restore?path=notes/hello.md", nil, headers)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestFileHandler_RestoreFile_NotFound(t *testing.T) {
+	h := newFileTestHarness()
+	accessToken, deviceID := fileRegisterAndLogin(t, h, "user@example.com", "password123")
+	vaultID := fileCreateVault(t, h, accessToken, deviceID, "Test Vault")
+
+	headers := fileAuthHeaders(accessToken, deviceID)
+	rec := doRawRequest(h, "POST", "/sync/v1/vaults/"+vaultID+"/files/restore?path=nonexistent.md", nil, headers)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestFileHandler_RestoreFile_MissingPath(t *testing.T) {
+	h := newFileTestHarness()
+	accessToken, deviceID := fileRegisterAndLogin(t, h, "user@example.com", "password123")
+	vaultID := fileCreateVault(t, h, accessToken, deviceID, "Test Vault")
+
+	headers := fileAuthHeaders(accessToken, deviceID)
+	rec := doRawRequest(h, "POST", "/sync/v1/vaults/"+vaultID+"/files/restore", nil, headers)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestFileHandler_RenameFile_Success(t *testing.T) {

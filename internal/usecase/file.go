@@ -504,6 +504,68 @@ func (uc *FileUsecase) DeleteFile(ctx context.Context, input DeleteFileInput) er
 	return nil
 }
 
+type RestoreFileInput struct {
+	UserID   uuid.UUID
+	DeviceID uuid.UUID
+	VaultID  uuid.UUID
+	FilePath string
+}
+
+func (uc *FileUsecase) RestoreFile(ctx context.Context, input RestoreFileInput) error {
+	if input.FilePath == "" {
+		return domain.ErrInvalidInput
+	}
+
+	member, err := uc.members.GetByVaultAndUser(ctx, input.VaultID, input.UserID)
+	if err != nil {
+		if err == domain.ErrNotFound {
+			return domain.ErrVaultAccessDenied
+		}
+		return err
+	}
+
+	if !member.Role.CanWrite() {
+		return domain.ErrInsufficientRole
+	}
+
+	existing, err := uc.latest.Get(ctx, input.VaultID, input.FilePath)
+	if err != nil {
+		return err
+	}
+
+	if !existing.Deleted {
+		return domain.ErrInvalidInput
+	}
+
+	now := time.Now()
+	existing.Deleted = false
+	existing.LastModifiedBy = input.UserID
+	existing.LastDeviceID = input.DeviceID
+	existing.UpdatedAt = now
+	existing.CurrentVersion = existing.CurrentVersion + 1
+
+	if err := uc.latest.Upsert(ctx, existing); err != nil {
+		return err
+	}
+
+	syncEvent := &domain.SyncEvent{
+		VaultID:   input.VaultID,
+		EventType: domain.EventFileCreated,
+		FilePath:  input.FilePath,
+		Version:   existing.CurrentVersion,
+		ActorID:   input.UserID,
+		DeviceID:  input.DeviceID,
+		Metadata:  map[string]any{},
+		CreatedAt: now,
+	}
+
+	if err := uc.events.Create(ctx, syncEvent); err != nil {
+		return err
+	}
+	uc.publishSSE(syncEvent)
+	return nil
+}
+
 type RenameFileInput struct {
 	UserID   uuid.UUID
 	DeviceID uuid.UUID

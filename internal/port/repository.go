@@ -115,3 +115,10 @@ type CollabDocumentRepository interface {
 	CompactDocument(ctx context.Context, vaultID uuid.UUID, filePath string, compactedState []byte, stateVector []byte) error
 	DeleteDocument(ctx context.Context, vaultID uuid.UUID, filePath string) error
 }
+
+type SubscriptionRepository interface {
+	Create(ctx context.Context, sub *domain.Subscription) error
+	GetByUserID(ctx context.Context, userID uuid.UUID) (*domain.Subscription, error)
+	Update(ctx context.Context, sub *domain.Subscription) error
+	GetByExternalSubscriptionID(ctx context.Context, externalID string) (*domain.Subscription, error)
+}

@@ -57,3 +57,9 @@ type CollabBroker interface {
 	PeerCount(vaultID uuid.UUID, filePath string) int
 	PeerIDs(vaultID uuid.UUID, filePath string) []string
 }
+
+type SubscriptionGateway interface {
+	CreateCustomer(ctx context.Context, email string) (customerID string, err error)
+	CreateSubscriptionCheckout(ctx context.Context, customerID string, returnURL string) (checkoutURL string, err error)
+	GetSubscriptionStatus(ctx context.Context, subscriptionID string) (status string, err error)
+}

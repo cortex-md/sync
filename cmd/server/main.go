@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cortexnotes/cortex-sync/internal/adapter/abacatepay"
 	"github.com/cortexnotes/cortex-sync/internal/adapter/auth"
 	"github.com/cortexnotes/cortex-sync/internal/adapter/collab"
 	"github.com/cortexnotes/cortex-sync/internal/adapter/fake"
@@ -56,6 +57,7 @@ func main() {
 		latestRepo       port.FileLatestRepository
 		eventRepo        port.SyncEventRepository
 		collabRepo       port.CollabDocumentRepository
+		subscriptionRepo port.SubscriptionRepository
 		blobStorage      port.BlobStorage
 		tx               port.Transactor
 		dbPool           *pgxpool.Pool
@@ -78,6 +80,7 @@ func main() {
 		latestRepo = fake.NewFileLatestRepository()
 		eventRepo = fake.NewSyncEventRepository()
 		collabRepo = fake.NewCollabDocumentRepository()
+		subscriptionRepo = fake.NewSubscriptionRepository()
 		blobStorage = fake.NewBlobStorage()
 		tx = fake.NewTransactor()
 	} else {
@@ -101,6 +104,7 @@ func main() {
 		latestRepo = pgadapter.NewFileLatestRepository(dbPool)
 		eventRepo = pgadapter.NewSyncEventRepository(dbPool)
 		collabRepo = pgadapter.NewCollabDocumentRepository(dbPool)
+		subscriptionRepo = pgadapter.NewSubscriptionRepository(dbPool)
 
 		log.Info().Msg("connecting to S3/MinIO")
 		s3Storage, s3Err := s3adapter.NewBlobStorage(ctx, cfg.S3)
@@ -148,6 +152,16 @@ func main() {
 	encryptionHandler := handler.NewVaultEncryptionHandler(encryptionUC)
 	collabHandler := handler.NewCollabHandler(collabBroker, collabRepo, memberRepo, tokenGen, broker, cfg.Collab.FlushInterval)
 
+	var subscriptionHandler *handler.SubscriptionHandler
+	if cfg.Subscription.Enabled {
+		abacateClient := abacatepay.NewClient(cfg.Subscription.APIKey, cfg.Subscription.ProductID)
+		subscriptionUC := usecase.NewSubscriptionUsecase(subscriptionRepo, abacateClient, userRepo)
+		subscriptionHandler = handler.NewSubscriptionHandler(subscriptionUC)
+		log.Info().Msg("subscription validation enabled")
+	} else {
+		log.Info().Msg("subscription validation disabled (self-hosted mode)")
+	}
+
 	r := chi.NewRouter()
 
 	r.Use(cors.Handler(cors.Options{
@@ -189,53 +203,70 @@ func main() {
 			r.Put("/{deviceID}/sync-cursor", deviceHandler.UpdateSyncCursor)
 		})
 
-		r.Route("/vaults/v1", func(r chi.Router) {
-			r.Post("/", vaultHandler.Create)
-			r.Get("/", vaultHandler.List)
+		if cfg.Subscription.Enabled {
+			r.Route("/subscription/v1", func(r chi.Router) {
+				r.Post("/checkout", subscriptionHandler.CreateCheckout)
+				r.Get("/status", subscriptionHandler.GetStatus)
+			})
+		}
 
-			r.Get("/invites", inviteHandler.ListMyInvites)
-			r.Post("/invites/accept", inviteHandler.Accept)
+		r.Group(func(r chi.Router) {
+			if cfg.Subscription.Enabled {
+				r.Use(handler.SubscriptionMiddleware(subscriptionRepo, cfg.Subscription.CacheTTL))
+			}
 
-			r.Route("/{vaultID}", func(r chi.Router) {
-				r.Get("/", vaultHandler.Get)
-				r.Patch("/", vaultHandler.Update)
-				r.Delete("/", vaultHandler.Delete)
+			r.Route("/vaults/v1", func(r chi.Router) {
+				r.Post("/", vaultHandler.Create)
+				r.Get("/", vaultHandler.List)
 
-				r.Route("/members", func(r chi.Router) {
-					r.Get("/", memberHandler.List)
-					r.Patch("/{userID}", memberHandler.UpdateRole)
-					r.Delete("/{userID}", memberHandler.Remove)
-				})
+				r.Get("/invites", inviteHandler.ListMyInvites)
+				r.Post("/invites/accept", inviteHandler.Accept)
 
-				r.Route("/invites", func(r chi.Router) {
-					r.Post("/", inviteHandler.Create)
-					r.Get("/", inviteHandler.ListByVault)
-					r.Delete("/{inviteID}", inviteHandler.Delete)
+				r.Route("/{vaultID}", func(r chi.Router) {
+					r.Get("/", vaultHandler.Get)
+					r.Patch("/", vaultHandler.Update)
+					r.Delete("/", vaultHandler.Delete)
+
+					r.Route("/members", func(r chi.Router) {
+						r.Get("/", memberHandler.List)
+						r.Patch("/{userID}", memberHandler.UpdateRole)
+						r.Delete("/{userID}", memberHandler.Remove)
+					})
+
+					r.Route("/invites", func(r chi.Router) {
+						r.Post("/", inviteHandler.Create)
+						r.Get("/", inviteHandler.ListByVault)
+						r.Delete("/{inviteID}", inviteHandler.Delete)
+					})
 				})
 			})
-		})
 
-		r.Route("/sync/v1/vaults/{vaultID}", func(r chi.Router) {
-			r.Post("/files", fileHandler.UploadSnapshot)
-			r.Get("/files", fileHandler.DownloadSnapshot)
-			r.Delete("/files", fileHandler.DeleteFile)
-			r.Post("/files/deltas", fileHandler.UploadDelta)
-			r.Get("/files/deltas", fileHandler.DownloadDeltas)
-			r.Post("/files/rename", fileHandler.RenameFile)
-			r.Post("/files/restore", fileHandler.RestoreFile)
-			r.Post("/files/bulk", fileHandler.BulkGetFileInfo)
-			r.Get("/files/info", fileHandler.GetFileInfo)
-			r.Get("/files/list", fileHandler.ListFiles)
-			r.Get("/files/history", fileHandler.GetHistory)
-			r.Get("/changes", fileHandler.ListChanges)
-			r.Get("/events", sseHandler.Events)
-			r.Get("/collab/peers", collabHandler.GetPeers)
-			r.Get("/encryption", encryptionHandler.Get)
-			r.Post("/encryption", encryptionHandler.Create)
+			r.Route("/sync/v1/vaults/{vaultID}", func(r chi.Router) {
+				r.Post("/files", fileHandler.UploadSnapshot)
+				r.Get("/files", fileHandler.DownloadSnapshot)
+				r.Delete("/files", fileHandler.DeleteFile)
+				r.Post("/files/deltas", fileHandler.UploadDelta)
+				r.Get("/files/deltas", fileHandler.DownloadDeltas)
+				r.Post("/files/rename", fileHandler.RenameFile)
+				r.Post("/files/restore", fileHandler.RestoreFile)
+				r.Post("/files/bulk", fileHandler.BulkGetFileInfo)
+				r.Get("/files/info", fileHandler.GetFileInfo)
+				r.Get("/files/list", fileHandler.ListFiles)
+				r.Get("/files/history", fileHandler.GetHistory)
+				r.Get("/changes", fileHandler.ListChanges)
+				r.Get("/events", sseHandler.Events)
+				r.Get("/collab/peers", collabHandler.GetPeers)
+				r.Get("/encryption", encryptionHandler.Get)
+				r.Post("/encryption", encryptionHandler.Create)
+			})
 		})
 	})
 
 	r.Get("/sync/v1/vaults/{vaultID}/collab", collabHandler.Connect)
+
+	if cfg.Subscription.Enabled {
+		r.Post("/webhooks/abacatepay", subscriptionHandler.HandleWebhook)
+	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	srv := &http.Server{

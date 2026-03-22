@@ -1,6 +1,6 @@
 module github.com/cortexnotes/cortex-sync
 
-go 1.25.5
+go 1.24.7
 
 require (
 	github.com/go-chi/chi/v5 v5.2.5
@@ -15,6 +15,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/crypto v0.48.0
 	golang.org/x/time v0.14.0
+	nhooyr.io/websocket v1.8.17
 )
 
 require (
@@ -58,5 +59,4 @@ require (
 	golang.org/x/text v0.34.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	nhooyr.io/websocket v1.8.17 // indirect
 )

@@ -16,7 +16,15 @@ type Config struct {
 	Metrics      MetricsConfig
 	Sync         SyncConfig
 	Collab       CollabConfig
+	Subscription SubscriptionConfig
 	UseFakeRepos bool
+}
+
+type SubscriptionConfig struct {
+	Enabled   bool
+	APIKey    string
+	ProductID string
+	CacheTTL  time.Duration
 }
 
 type SyncConfig struct {
@@ -138,6 +146,12 @@ func Load() (*Config, error) {
 			FlushInterval:   v.GetDuration("collab.flush_interval"),
 			MaxBufBytes:     v.GetInt("collab.max_buf_bytes"),
 		},
+		Subscription: SubscriptionConfig{
+			Enabled:   v.GetBool("subscription.enabled"),
+			APIKey:    v.GetString("subscription.api_key"),
+			ProductID: v.GetString("subscription.product_id"),
+			CacheTTL:  v.GetDuration("subscription.cache_ttl"),
+		},
 		UseFakeRepos: v.GetBool("use_fake_repos"),
 	}
 
@@ -183,6 +197,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("collab.max_peers_per_room", 10)
 	v.SetDefault("collab.flush_interval", 10*time.Second)
 	v.SetDefault("collab.max_buf_bytes", 4*1024*1024)
+
+	v.SetDefault("subscription.enabled", false)
+	v.SetDefault("subscription.api_key", "")
+	v.SetDefault("subscription.product_id", "")
+	v.SetDefault("subscription.cache_ttl", 5*time.Minute)
 
 	v.SetDefault("use_fake_repos", false)
 }

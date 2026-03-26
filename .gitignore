@@ -3,5 +3,6 @@ coverage.out
 coverage.html
 *.env
 .env*
+!.env.example
 config.yaml
 config.yml

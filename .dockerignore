@@ -1,0 +1,11 @@
+.git
+.github
+bin
+coverage.out
+coverage.html
+deploy/production/.env
+deploy/production/backups
+deploy/production/runtime
+*.env
+.env*
+!.env.example

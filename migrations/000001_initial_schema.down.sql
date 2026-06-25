@@ -1,0 +1,14 @@
+DROP TRIGGER IF EXISTS sync_event_notify ON sync_events;
+DROP FUNCTION IF EXISTS notify_sync_event();
+DROP TABLE IF EXISTS sync_events;
+DROP TABLE IF EXISTS file_latest;
+DROP TABLE IF EXISTS file_deltas;
+DROP TABLE IF EXISTS file_snapshots;
+DROP TABLE IF EXISTS vault_keys;
+DROP TABLE IF EXISTS vault_invites;
+DROP TABLE IF EXISTS vault_members;
+DROP TABLE IF EXISTS vaults;
+DROP TYPE IF EXISTS vault_role;
+DROP TABLE IF EXISTS refresh_tokens;
+DROP TABLE IF EXISTS devices;
+DROP TABLE IF EXISTS users;

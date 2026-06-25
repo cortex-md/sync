@@ -1,0 +1,109 @@
+services:
+  migrate:
+    container_name: cortex-sync-migrate
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["migrate", "up"]
+    environment:
+      CORTEX_DATABASE_URL: postgres://cortex:cortex@postgres:5432/cortex_sync?sslmode=disable
+      CORTEX_STORAGE_BACKEND: local
+      CORTEX_STORAGE_ENDPOINT: minio:9000
+      CORTEX_STORAGE_ACCESS_KEY: minioadmin
+      CORTEX_STORAGE_SECRET_KEY: minioadmin
+      CORTEX_STORAGE_BUCKET: cortex-snapshots
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  sync:
+    container_name: cortex-sync
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      CORTEX_SERVER_ENV: ${CORTEX_SERVER_ENV:-development}
+      CORTEX_DATABASE_URL: postgres://cortex:cortex@postgres:5432/cortex_sync?sslmode=disable
+      CORTEX_DATABASE_MAX_CONNS: 10
+      CORTEX_DATABASE_MIN_CONNS: 2
+      CORTEX_STORAGE_BACKEND: local
+      CORTEX_STORAGE_ENDPOINT: minio:9000
+      CORTEX_STORAGE_ACCESS_KEY: minioadmin
+      CORTEX_STORAGE_SECRET_KEY: minioadmin
+      CORTEX_STORAGE_BUCKET: cortex-snapshots
+      CORTEX_AUTH_ACCESS_TOKEN_SECRET: ${CORTEX_AUTH_ACCESS_TOKEN_SECRET:-dev-only-change-this-token-secret-32}
+      CORTEX_AUTH_REGISTRATION_MODE: ${CORTEX_AUTH_REGISTRATION_MODE:-open}
+      CORTEX_SUBSCRIPTION_ENABLED: ${CORTEX_SUBSCRIPTION_ENABLED:-false}
+      CORTEX_SUBSCRIPTION_API_KEY: ${CORTEX_SUBSCRIPTION_API_KEY:-}
+      CORTEX_SUBSCRIPTION_PRODUCT_ID: ${CORTEX_SUBSCRIPTION_PRODUCT_ID:-}
+      CORTEX_SUBSCRIPTION_WEBHOOK_SECRET: ${CORTEX_SUBSCRIPTION_WEBHOOK_SECRET:-}
+      CORTEX_SUBSCRIPTION_WEBHOOK_HMAC_KEY: ${CORTEX_SUBSCRIPTION_WEBHOOK_HMAC_KEY:-}
+      CORTEX_SUBSCRIPTION_CACHE_TTL: ${CORTEX_SUBSCRIPTION_CACHE_TTL:-60s}
+      CORTEX_SUBSCRIPTION_RENEWAL_GRACE: ${CORTEX_SUBSCRIPTION_RENEWAL_GRACE:-48h}
+      CORTEX_SUBSCRIPTION_ABACATEPAY_BASE_URL: ${CORTEX_SUBSCRIPTION_ABACATEPAY_BASE_URL:-https://api.abacatepay.com/v2}
+      CORTEX_DEVOPS_DISCORD_WEBHOOK_URL: ${CORTEX_DEVOPS_DISCORD_WEBHOOK_URL:-}
+      CORTEX_DEVOPS_DISCORD_USERNAME: ${CORTEX_DEVOPS_DISCORD_USERNAME:-Cortex DevOps}
+      CORTEX_DEVOPS_DISCORD_TIMEOUT: ${CORTEX_DEVOPS_DISCORD_TIMEOUT:-5s}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    mem_limit: 256m
+    cpus: "0.50"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:8080/ready",
+        ]
+  postgres:
+    container_name: cortex-postgres
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cortex
+      POSTGRES_PASSWORD: cortex
+      POSTGRES_DB: cortex_sync
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cortex -d cortex_sync"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    mem_limit: 256m
+    cpus: "0.50"
+
+  minio:
+    container_name: cortex-minio
+    image: minio/minio:latest
+    command: server /data --address ":9000"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_BROWSER: "off"
+    ports:
+      - "9000:9000"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    mem_limit: 256m
+    cpus: "0.50"
+
+volumes:
+  pgdata:
+  miniodata:

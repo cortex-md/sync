@@ -62,6 +62,9 @@ type SubscriptionWebhookInput struct {
 	Status                 string
 	Frequency              string
 	TrialEndsAt            time.Time
+	CurrentPeriodStart     time.Time
+	CurrentPeriodEnd       time.Time
+	PlanPriceID            string
 	OccurredAt             time.Time
 }
 
@@ -104,7 +107,10 @@ func (uc *SubscriptionUsecase) CreateCheckout(ctx context.Context, input CreateC
 	}
 
 	if sub.ExternalCustomerID == "" {
-		customerID, err := uc.gateway.CreateCustomer(ctx, user.Email)
+		customerID, err := uc.gateway.CreateCustomer(ctx, port.SubscriptionCustomerInput{
+			UserID: user.ID,
+			Email:  user.Email,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -121,7 +127,8 @@ func (uc *SubscriptionUsecase) CreateCheckout(ctx context.Context, input CreateC
 		ReturnURL:     strings.TrimSpace(input.ReturnURL),
 		CompletionURL: strings.TrimSpace(input.CompletionURL),
 		Metadata: map[string]string{
-			"user_id": input.UserID.String(),
+			"subscription_id": sub.ID.String(),
+			"user_id":         input.UserID.String(),
 		},
 	})
 	if err != nil {
@@ -296,7 +303,9 @@ func (uc *SubscriptionUsecase) applyWebhook(sub *domain.Subscription, input Subs
 	if input.ExternalCustomerID != "" {
 		sub.ExternalCustomerID = input.ExternalCustomerID
 	}
-	if uc.planProduct != "" {
+	if strings.TrimSpace(input.PlanPriceID) != "" {
+		sub.PlanProductID = strings.TrimSpace(input.PlanPriceID)
+	} else if uc.planProduct != "" {
 		sub.PlanProductID = uc.planProduct
 	}
 
@@ -305,8 +314,14 @@ func (uc *SubscriptionUsecase) applyWebhook(sub *domain.Subscription, input Subs
 		return uc.activateSubscription(sub, input)
 	case "subscription.trial_started":
 		return uc.activateTrial(sub, input)
+	case "subscription.pending":
+		sub.Status = domain.SubscriptionStatusPending
+		return nil
 	case "subscription.cancelled":
 		effectiveAt := webhookEffectiveTime(input, uc.now())
+		if !input.CurrentPeriodEnd.IsZero() {
+			effectiveAt = input.CurrentPeriodEnd
+		}
 		sub.Status = domain.SubscriptionStatusCancelled
 		sub.CurrentPeriodEnd = effectiveAt
 		sub.EntitlementExpiresAt = effectiveAt
@@ -318,33 +333,52 @@ func (uc *SubscriptionUsecase) applyWebhook(sub *domain.Subscription, input Subs
 
 func (uc *SubscriptionUsecase) activateSubscription(sub *domain.Subscription, input SubscriptionWebhookInput) error {
 	effectiveAt := webhookEffectiveTime(input, uc.now())
-	periodEnd, err := periodEndForFrequency(effectiveAt, input.Frequency)
-	if err != nil {
-		return err
+	periodStart := effectiveAt
+	if !input.CurrentPeriodStart.IsZero() {
+		periodStart = input.CurrentPeriodStart
 	}
-	sub.Status = domain.SubscriptionStatusActive
-	sub.CurrentPeriodStart = effectiveAt
-	sub.CurrentPeriodEnd = periodEnd
-	sub.EntitlementExpiresAt = periodEnd.Add(uc.renewalGrace)
-	sub.BillingCycle = strings.ToUpper(strings.TrimSpace(input.Frequency))
-	return nil
-}
-
-func (uc *SubscriptionUsecase) activateTrial(sub *domain.Subscription, input SubscriptionWebhookInput) error {
-	effectiveAt := webhookEffectiveTime(input, uc.now())
-	expiresAt := input.TrialEndsAt
-	if expiresAt.IsZero() {
+	periodEnd := input.CurrentPeriodEnd
+	if periodEnd.IsZero() {
 		var err error
-		expiresAt, err = periodEndForFrequency(effectiveAt, input.Frequency)
+		periodEnd, err = periodEndForFrequency(periodStart, input.Frequency)
 		if err != nil {
 			return err
 		}
 	}
 	sub.Status = domain.SubscriptionStatusActive
-	sub.CurrentPeriodStart = effectiveAt
+	sub.CurrentPeriodStart = periodStart
+	sub.CurrentPeriodEnd = periodEnd
+	sub.EntitlementExpiresAt = periodEnd.Add(uc.renewalGrace)
+	if frequency := strings.ToUpper(strings.TrimSpace(input.Frequency)); frequency != "" {
+		sub.BillingCycle = frequency
+	}
+	return nil
+}
+
+func (uc *SubscriptionUsecase) activateTrial(sub *domain.Subscription, input SubscriptionWebhookInput) error {
+	effectiveAt := webhookEffectiveTime(input, uc.now())
+	periodStart := effectiveAt
+	if !input.CurrentPeriodStart.IsZero() {
+		periodStart = input.CurrentPeriodStart
+	}
+	expiresAt := input.TrialEndsAt
+	if expiresAt.IsZero() {
+		expiresAt = input.CurrentPeriodEnd
+	}
+	if expiresAt.IsZero() {
+		var err error
+		expiresAt, err = periodEndForFrequency(periodStart, input.Frequency)
+		if err != nil {
+			return err
+		}
+	}
+	sub.Status = domain.SubscriptionStatusActive
+	sub.CurrentPeriodStart = periodStart
 	sub.CurrentPeriodEnd = expiresAt
 	sub.EntitlementExpiresAt = expiresAt.Add(uc.renewalGrace)
-	sub.BillingCycle = strings.ToUpper(strings.TrimSpace(input.Frequency))
+	if frequency := strings.ToUpper(strings.TrimSpace(input.Frequency)); frequency != "" {
+		sub.BillingCycle = frequency
+	}
 	return nil
 }
 

@@ -162,7 +162,7 @@ or polling sync access require an active entitlement.
 
 Requires authentication.
 
-Creates an Abacate Pay subscription checkout for the authenticated user.
+Creates a Stripe Checkout subscription session for the authenticated user.
 
 **Request**
 
@@ -204,7 +204,7 @@ When a subscription exists:
   "current_period_end": "2026-07-01T00:00:00Z",
   "entitlement_expires_at": "2026-07-03T00:00:00Z",
   "billing_cycle": "MONTHLY",
-  "plan_product_id": "prod_..."
+  "plan_product_id": "price_..."
 }
 ```
 
@@ -217,17 +217,17 @@ When no subscription exists:
 }
 ```
 
-### POST /webhooks/abacatepay?webhookSecret=...
+### POST /webhooks/stripe
 
-Public endpoint called by Abacate Pay. The server validates both the `webhookSecret` query value and
-`X-Webhook-Signature` HMAC-SHA256 signature over the raw body before processing.
+Public endpoint called by Stripe. The server validates the `Stripe-Signature` header with the Stripe
+webhook endpoint secret before processing the raw body.
 
 Handled events:
 
-- `subscription.completed`
-- `subscription.renewed`
-- `subscription.trial_started`
-- `subscription.cancelled`
+- `checkout.session.completed`
+- `customer.subscription.created`
+- `customer.subscription.updated`
+- `customer.subscription.deleted`
 
 Duplicate webhook event IDs return `200` without reprocessing.
 

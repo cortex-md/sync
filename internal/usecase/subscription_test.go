@@ -27,13 +27,15 @@ type fakeGateway struct {
 	checkoutErr   error
 	customerCalls int
 	checkoutCalls int
+	customerInput port.SubscriptionCustomerInput
 	input         port.SubscriptionCheckoutInput
 }
 
-func (g *fakeGateway) CreateCustomer(_ context.Context, _ string) (string, error) {
+func (g *fakeGateway) CreateCustomer(_ context.Context, input port.SubscriptionCustomerInput) (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.customerCalls++
+	g.customerInput = input
 	if g.customerErr != nil {
 		return "", g.customerErr
 	}
@@ -58,7 +60,7 @@ func (g *fakeGateway) CreateSubscriptionCheckout(_ context.Context, input port.S
 }
 
 func newTestSubscriptionUsecase(subRepo *fake.SubscriptionRepository, gateway *fakeGateway, users *fake.UserRepository) *usecase.SubscriptionUsecase {
-	return usecase.NewSubscriptionUsecase(subRepo, gateway, users, "prod_123", 48*time.Hour)
+	return usecase.NewSubscriptionUsecase(subRepo, gateway, users, "price_123", 48*time.Hour)
 }
 
 func webhookSignatureTime() time.Time {
@@ -89,8 +91,8 @@ func newSubscriptionTestSetup() *subscriptionTestSetup {
 	users := fake.NewUserRepository()
 	gateway := &fakeGateway{
 		customerID:  "cust_123",
-		checkoutURL: "https://pay.abacatepay.com/checkout/abc",
-		checkoutID:  "bill_123",
+		checkoutURL: "https://checkout.stripe.com/c/pay/cs_test_123",
+		checkoutID:  "cs_test_123",
 	}
 	uc := newTestSubscriptionUsecase(subRepo, gateway, users)
 	return &subscriptionTestSetup{uc: uc, subRepo: subRepo, users: users, gateway: gateway}
@@ -187,21 +189,24 @@ func TestCreateCheckout_Success(t *testing.T) {
 		ReturnURL: "https://app.cortex.com/settings",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "https://pay.abacatepay.com/checkout/abc", output.CheckoutURL)
+	assert.Equal(t, "https://checkout.stripe.com/c/pay/cs_test_123", output.CheckoutURL)
 
 	sub, err := s.subRepo.GetByUserID(context.Background(), user.ID)
 	require.NoError(t, err)
 	assert.Equal(t, domain.SubscriptionStatusPending, sub.Status)
 	assert.Equal(t, "cust_123", sub.ExternalCustomerID)
-	assert.Equal(t, "bill_123", sub.ExternalCheckoutID)
-	assert.Equal(t, "prod_123", sub.PlanProductID)
+	assert.Equal(t, "cs_test_123", sub.ExternalCheckoutID)
+	assert.Equal(t, "price_123", sub.PlanProductID)
+	assert.Equal(t, user.ID, s.gateway.customerInput.UserID)
+	assert.Equal(t, user.Email, s.gateway.customerInput.Email)
 	assert.Equal(t, sub.ID.String(), s.gateway.input.ExternalID)
+	assert.Equal(t, sub.ID.String(), s.gateway.input.Metadata["subscription_id"])
 	assert.Equal(t, user.ID.String(), s.gateway.input.Metadata["user_id"])
 	require.Len(t, notifier.events, 1)
 	assert.Equal(t, "subscription.checkout_created", notifier.events[0].Type)
 	assert.Equal(t, user.ID, notifier.events[0].UserID)
-	assert.Equal(t, "bill_123", notifier.events[0].Fields["checkout_id"])
-	assert.Equal(t, "prod_123", notifier.events[0].Fields["plan_product_id"])
+	assert.Equal(t, "cs_test_123", notifier.events[0].Fields["checkout_id"])
+	assert.Equal(t, "price_123", notifier.events[0].Fields["plan_product_id"])
 }
 
 func TestCreateCheckout_MissingReturnURL(t *testing.T) {
@@ -325,6 +330,83 @@ func TestHandleWebhook_ActivatesSubscription(t *testing.T) {
 	assert.Equal(t, "MONTHLY", updated.BillingCycle)
 	assert.Equal(t, webhookSignatureTime().AddDate(0, 1, 0), updated.CurrentPeriodEnd)
 	assert.Equal(t, webhookSignatureTime().AddDate(0, 1, 0).Add(48*time.Hour), updated.EntitlementExpiresAt)
+}
+
+func TestHandleWebhook_ActivatesSubscriptionWithExplicitStripePeriod(t *testing.T) {
+	s := newSubscriptionTestSetup()
+	userID := uuid.New()
+	now := time.Now()
+	subID := uuid.New()
+	periodStart := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	periodEnd := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+
+	sub := &domain.Subscription{
+		ID:                 subID,
+		UserID:             userID,
+		ExternalCustomerID: "cus_123",
+		Status:             domain.SubscriptionStatusPending,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+	require.NoError(t, s.subRepo.Create(context.Background(), sub))
+
+	output, err := s.uc.HandleWebhook(context.Background(), usecase.SubscriptionWebhookInput{
+		EventID:                "evt_stripe_period",
+		Event:                  "subscription.completed",
+		ExternalSubscriptionID: "sub_stripe",
+		ExternalID:             subID.String(),
+		ExternalCustomerID:     "cus_123",
+		Status:                 "active",
+		Frequency:              "MONTHLY",
+		CurrentPeriodStart:     periodStart,
+		CurrentPeriodEnd:       periodEnd,
+		PlanPriceID:            "price_123",
+		OccurredAt:             webhookSignatureTime(),
+	})
+	require.NoError(t, err)
+	require.True(t, output.Processed)
+
+	updated, err := s.subRepo.GetByUserID(context.Background(), userID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.SubscriptionStatusActive, updated.Status)
+	assert.Equal(t, periodStart, updated.CurrentPeriodStart)
+	assert.Equal(t, periodEnd, updated.CurrentPeriodEnd)
+	assert.Equal(t, periodEnd.Add(48*time.Hour), updated.EntitlementExpiresAt)
+	assert.Equal(t, "price_123", updated.PlanProductID)
+}
+
+func TestHandleWebhook_IncompleteSubscriptionDoesNotGrantAccess(t *testing.T) {
+	s := newSubscriptionTestSetup()
+	userID := uuid.New()
+	now := time.Now()
+	subID := uuid.New()
+
+	sub := &domain.Subscription{
+		ID:                 subID,
+		UserID:             userID,
+		ExternalCustomerID: "cus_123",
+		Status:             domain.SubscriptionStatusPending,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+	require.NoError(t, s.subRepo.Create(context.Background(), sub))
+
+	output, err := s.uc.HandleWebhook(context.Background(), usecase.SubscriptionWebhookInput{
+		EventID:                "evt_incomplete",
+		Event:                  "subscription.pending",
+		ExternalSubscriptionID: "sub_incomplete",
+		ExternalID:             subID.String(),
+		ExternalCustomerID:     "cus_123",
+		Status:                 "incomplete",
+		OccurredAt:             webhookSignatureTime(),
+	})
+	require.NoError(t, err)
+	require.True(t, output.Processed)
+
+	updated, err := s.subRepo.GetByUserID(context.Background(), userID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.SubscriptionStatusPending, updated.Status)
+	assert.False(t, updated.IsActiveAt(webhookSignatureTime()))
 }
 
 func TestHandleWebhook_CancelledSubscription(t *testing.T) {

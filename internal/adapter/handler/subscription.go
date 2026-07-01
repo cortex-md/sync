@@ -2,18 +2,19 @@ package handler
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/cortexnotes/cortex-sync/internal/domain"
 	"github.com/cortexnotes/cortex-sync/internal/usecase"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
+	stripe "github.com/stripe/stripe-go/v86"
+	"github.com/stripe/stripe-go/v86/webhook"
 )
 
 type SubscriptionInvalidator interface {
@@ -27,8 +28,7 @@ type SubscriptionHandler struct {
 }
 
 type WebhookSecurity struct {
-	Secret  string
-	HMACKey string
+	StripeWebhookSecret string
 }
 
 func NewSubscriptionHandler(uc *usecase.SubscriptionUsecase, webhook WebhookSecurity, invalidator SubscriptionInvalidator) *SubscriptionHandler {
@@ -116,52 +116,29 @@ func (h *SubscriptionHandler) GetStatus(w http.ResponseWriter, r *http.Request) 
 	WriteJSON(w, http.StatusOK, resp)
 }
 
-type webhookPayload struct {
-	ID      string `json:"id"`
-	Event   string `json:"event"`
-	DevMode bool   `json:"devMode"`
-	Data    struct {
-		Subscription struct {
-			ID          string `json:"id"`
-			Status      string `json:"status"`
-			Frequency   string `json:"frequency"`
-			TrialEndsAt string `json:"trialEndsAt"`
-			CreatedAt   string `json:"createdAt"`
-			UpdatedAt   string `json:"updatedAt"`
-		} `json:"subscription"`
-		Customer *struct {
-			ID string `json:"id"`
-		} `json:"customer"`
-		Checkout *struct {
-			ID         string `json:"id"`
-			ExternalID string `json:"externalId"`
-			CustomerID string `json:"customerId"`
-			UpdatedAt  string `json:"updatedAt"`
-			CreatedAt  string `json:"createdAt"`
-		} `json:"checkout"`
-	} `json:"data"`
-}
-
 func (h *SubscriptionHandler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	rawBody, err := io.ReadAll(r.Body)
 	if err != nil {
 		WriteError(w, http.StatusBadRequest, "invalid webhook payload")
 		return
 	}
-	if !h.webhook.Valid(r, rawBody) {
-		WriteError(w, http.StatusUnauthorized, "unauthorized webhook")
-		return
-	}
-
-	var payload webhookPayload
-	if err := json.Unmarshal(rawBody, &payload); err != nil {
+	event, err := h.webhook.ConstructEvent(r, rawBody)
+	if err != nil {
+		if isStripeSignatureError(err) {
+			WriteError(w, http.StatusUnauthorized, "unauthorized webhook")
+			return
+		}
 		WriteError(w, http.StatusBadRequest, "invalid webhook payload")
 		return
 	}
 
-	input, err := payload.toUsecaseInput()
+	input, handled, err := stripeEventToUsecaseInput(event)
 	if err != nil {
 		WriteError(w, http.StatusBadRequest, "invalid webhook payload")
+		return
+	}
+	if !handled {
+		WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
 
@@ -177,83 +154,182 @@ func (h *SubscriptionHandler) HandleWebhook(w http.ResponseWriter, r *http.Reque
 	WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (p webhookPayload) toUsecaseInput() (usecase.SubscriptionWebhookInput, error) {
-	if p.ID == "" || p.Event == "" {
-		return usecase.SubscriptionWebhookInput{}, domain.ErrInvalidInput
+func (s WebhookSecurity) ConstructEvent(r *http.Request, rawBody []byte) (stripe.Event, error) {
+	if strings.TrimSpace(s.StripeWebhookSecret) == "" {
+		return stripe.Event{}, webhook.ErrNotSigned
 	}
-	customerID := ""
-	if p.Data.Customer != nil {
-		customerID = p.Data.Customer.ID
+	return webhook.ConstructEventWithOptions(
+		rawBody,
+		r.Header.Get("Stripe-Signature"),
+		s.StripeWebhookSecret,
+		webhook.ConstructEventOptions{IgnoreAPIVersionMismatch: true},
+	)
+}
+
+func isStripeSignatureError(err error) bool {
+	if errors.Is(err, webhook.ErrNotSigned) || errors.Is(err, webhook.ErrNoValidSignature) {
+		return true
 	}
-	externalCheckoutID := ""
-	externalID := ""
-	if p.Data.Checkout != nil {
-		externalCheckoutID = p.Data.Checkout.ID
-		externalID = p.Data.Checkout.ExternalID
-		if customerID == "" {
-			customerID = p.Data.Checkout.CustomerID
+	return strings.Contains(strings.ToLower(err.Error()), "signature")
+}
+
+func stripeEventToUsecaseInput(event stripe.Event) (usecase.SubscriptionWebhookInput, bool, error) {
+	if event.ID == "" || event.Type == "" {
+		return usecase.SubscriptionWebhookInput{}, false, domain.ErrInvalidInput
+	}
+	switch event.Type {
+	case "checkout.session.completed":
+		return checkoutSessionEventToUsecaseInput(event)
+	case "customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted":
+		return subscriptionEventToUsecaseInput(event)
+	default:
+		return usecase.SubscriptionWebhookInput{}, false, nil
+	}
+}
+
+func checkoutSessionEventToUsecaseInput(event stripe.Event) (usecase.SubscriptionWebhookInput, bool, error) {
+	var session stripe.CheckoutSession
+	if err := json.Unmarshal(event.Data.Raw, &session); err != nil {
+		return usecase.SubscriptionWebhookInput{}, false, err
+	}
+	input := usecase.SubscriptionWebhookInput{
+		EventID:                event.ID,
+		Event:                  "subscription.checkout_completed",
+		ExternalCheckoutID:     session.ID,
+		ExternalID:             firstNonEmpty(session.ClientReferenceID, session.Metadata["subscription_id"]),
+		ExternalCustomerID:     stripeCustomerID(session.Customer),
+		ExternalSubscriptionID: stripeSubscriptionID(session.Subscription),
+		OccurredAt:             stripeEventTime(event),
+	}
+	if input.ExternalSubscriptionID == "" && input.ExternalCheckoutID == "" && input.ExternalID == "" && input.ExternalCustomerID == "" {
+		return usecase.SubscriptionWebhookInput{}, false, domain.ErrInvalidInput
+	}
+	return input, true, nil
+}
+
+func subscriptionEventToUsecaseInput(event stripe.Event) (usecase.SubscriptionWebhookInput, bool, error) {
+	var subscription stripe.Subscription
+	if err := json.Unmarshal(event.Data.Raw, &subscription); err != nil {
+		return usecase.SubscriptionWebhookInput{}, false, err
+	}
+	periodStart, periodEnd, frequency, priceID := stripeSubscriptionPeriod(&subscription)
+	input := usecase.SubscriptionWebhookInput{
+		EventID:                event.ID,
+		Event:                  normalizedStripeSubscriptionEvent(string(event.Type), subscription.Status),
+		ExternalSubscriptionID: subscription.ID,
+		ExternalID:             subscription.Metadata["subscription_id"],
+		ExternalCustomerID:     stripeCustomerID(subscription.Customer),
+		Status:                 string(subscription.Status),
+		Frequency:              frequency,
+		TrialEndsAt:            stripeUnixTime(subscription.TrialEnd),
+		CurrentPeriodStart:     periodStart,
+		CurrentPeriodEnd:       periodEnd,
+		PlanPriceID:            priceID,
+		OccurredAt:             stripeEventTime(event),
+	}
+	if input.ExternalSubscriptionID == "" && input.ExternalID == "" && input.ExternalCustomerID == "" {
+		return usecase.SubscriptionWebhookInput{}, false, domain.ErrInvalidInput
+	}
+	return input, true, nil
+}
+
+func normalizedStripeSubscriptionEvent(eventType string, status stripe.SubscriptionStatus) string {
+	if eventType == "customer.subscription.deleted" {
+		return "subscription.cancelled"
+	}
+	switch status {
+	case stripe.SubscriptionStatusActive, stripe.SubscriptionStatusPastDue:
+		if eventType == "customer.subscription.created" {
+			return "subscription.completed"
+		}
+		return "subscription.renewed"
+	case stripe.SubscriptionStatusTrialing:
+		return "subscription.trial_started"
+	case stripe.SubscriptionStatusCanceled, stripe.SubscriptionStatusIncompleteExpired, stripe.SubscriptionStatusUnpaid:
+		return "subscription.cancelled"
+	case stripe.SubscriptionStatusIncomplete, stripe.SubscriptionStatusPaused:
+		return "subscription.pending"
+	default:
+		return "subscription.pending"
+	}
+}
+
+func stripeSubscriptionPeriod(subscription *stripe.Subscription) (time.Time, time.Time, string, string) {
+	if subscription.Items == nil {
+		return time.Time{}, time.Time{}, "", ""
+	}
+	for _, item := range subscription.Items.Data {
+		if item == nil {
+			continue
+		}
+		frequency := ""
+		priceID := ""
+		if item.Price != nil {
+			priceID = item.Price.ID
+			if item.Price.Recurring != nil {
+				frequency = stripeRecurringFrequency(item.Price.Recurring.Interval, item.Price.Recurring.IntervalCount)
+			}
+		}
+		return stripeUnixTime(item.CurrentPeriodStart), stripeUnixTime(item.CurrentPeriodEnd), frequency, priceID
+	}
+	return time.Time{}, time.Time{}, "", ""
+}
+
+func stripeRecurringFrequency(interval stripe.PriceRecurringInterval, count int64) string {
+	switch interval {
+	case stripe.PriceRecurringIntervalWeek:
+		if count == 1 {
+			return "WEEKLY"
+		}
+	case stripe.PriceRecurringIntervalMonth:
+		switch count {
+		case 1:
+			return "MONTHLY"
+		case 3:
+			return "QUARTERLY"
+		case 6:
+			return "SEMIANNUALLY"
+		}
+	case stripe.PriceRecurringIntervalYear:
+		if count == 1 {
+			return "ANNUALLY"
 		}
 	}
-	occurredAt := parseWebhookTime(p.Data.Subscription.UpdatedAt)
-	if occurredAt.IsZero() {
-		occurredAt = parseWebhookTime(p.Data.Subscription.CreatedAt)
+	return ""
+}
+
+func stripeEventTime(event stripe.Event) time.Time {
+	return stripeUnixTime(event.Created)
+}
+
+func stripeUnixTime(value int64) time.Time {
+	if value <= 0 {
+		return time.Time{}
 	}
-	if occurredAt.IsZero() && p.Data.Checkout != nil {
-		occurredAt = parseWebhookTime(p.Data.Checkout.UpdatedAt)
-		if occurredAt.IsZero() {
-			occurredAt = parseWebhookTime(p.Data.Checkout.CreatedAt)
+	return time.Unix(value, 0).UTC()
+}
+
+func stripeCustomerID(customer *stripe.Customer) string {
+	if customer == nil {
+		return ""
+	}
+	return customer.ID
+}
+
+func stripeSubscriptionID(subscription *stripe.Subscription) string {
+	if subscription == nil {
+		return ""
+	}
+	return subscription.ID
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
 		}
 	}
-	if p.Data.Subscription.ID == "" && externalCheckoutID == "" && externalID == "" && customerID == "" {
-		return usecase.SubscriptionWebhookInput{}, domain.ErrInvalidInput
-	}
-	return usecase.SubscriptionWebhookInput{
-		EventID:                p.ID,
-		Event:                  p.Event,
-		ExternalSubscriptionID: p.Data.Subscription.ID,
-		ExternalCheckoutID:     externalCheckoutID,
-		ExternalID:             externalID,
-		ExternalCustomerID:     customerID,
-		Status:                 p.Data.Subscription.Status,
-		Frequency:              p.Data.Subscription.Frequency,
-		TrialEndsAt:            parseWebhookTime(p.Data.Subscription.TrialEndsAt),
-		OccurredAt:             occurredAt,
-	}, nil
-}
-
-func parseWebhookTime(value string) time.Time {
-	if value == "" {
-		return time.Time{}
-	}
-	parsed, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil {
-		return time.Time{}
-	}
-	return parsed
-}
-
-func (s WebhookSecurity) Valid(r *http.Request, rawBody []byte) bool {
-	if s.Secret == "" || s.HMACKey == "" {
-		return false
-	}
-	if !constantStringEqual(r.URL.Query().Get("webhookSecret"), s.Secret) {
-		return false
-	}
-	signature := r.Header.Get("X-Webhook-Signature")
-	if signature == "" {
-		return false
-	}
-	mac := hmac.New(sha256.New, []byte(s.HMACKey))
-	mac.Write(rawBody)
-	expected := base64.StdEncoding.EncodeToString(mac.Sum(nil))
-	return constantStringEqual(expected, signature)
-}
-
-func constantStringEqual(expected string, actual string) bool {
-	if expected == "" || actual == "" {
-		return false
-	}
-	return hmac.Equal([]byte(expected), []byte(actual))
+	return ""
 }
 
 func handleSubscriptionError(ctx context.Context, w http.ResponseWriter, err error) {

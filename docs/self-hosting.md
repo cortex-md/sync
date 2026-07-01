@@ -51,8 +51,8 @@ Subscriptions are disabled by default for self-hosted servers:
 CORTEX_SUBSCRIPTION_ENABLED=false
 ```
 
-Leave it disabled for normal self-hosting. When it is enabled, production startup requires Abacate
-Pay API, product, webhook secret, and webhook HMAC values, and sync-mutating endpoints return `402`
+Leave it disabled for normal self-hosting. When it is enabled, production startup requires Stripe
+secret key, price ID, and webhook endpoint secret values, and sync-mutating endpoints return `402`
 until the authenticated user has an active entitlement.
 
 Optional Discord DevOps notifications are disabled by default:

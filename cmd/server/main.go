@@ -9,7 +9,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cortexnotes/cortex-sync/internal/adapter/abacatepay"
 	"github.com/cortexnotes/cortex-sync/internal/adapter/auth"
 	"github.com/cortexnotes/cortex-sync/internal/adapter/collab"
 	devopsadapter "github.com/cortexnotes/cortex-sync/internal/adapter/devops"
@@ -19,6 +18,7 @@ import (
 	pgadapter "github.com/cortexnotes/cortex-sync/internal/adapter/postgres"
 	s3adapter "github.com/cortexnotes/cortex-sync/internal/adapter/s3"
 	"github.com/cortexnotes/cortex-sync/internal/adapter/sse"
+	stripeadapter "github.com/cortexnotes/cortex-sync/internal/adapter/stripe"
 	"github.com/cortexnotes/cortex-sync/internal/config"
 	"github.com/cortexnotes/cortex-sync/internal/job"
 	"github.com/cortexnotes/cortex-sync/internal/port"
@@ -184,16 +184,14 @@ func main() {
 	var subscriptionHandler *handler.SubscriptionHandler
 	var entitlementChecker *handler.EntitlementChecker
 	if cfg.Subscription.Enabled {
-		abacateClient := abacatepay.NewClient(cfg.Subscription.APIKey, cfg.Subscription.ProductID)
-		abacateClient.SetBaseURL(cfg.Subscription.AbacatePayBaseURL)
+		stripeClient := stripeadapter.NewClient(cfg.Subscription.StripeSecretKey, cfg.Subscription.StripePriceID)
 		entitlementChecker = handler.NewEntitlementChecker(subscriptionRepo, cfg.Subscription.CacheTTL)
-		subscriptionUC := usecase.NewSubscriptionUsecase(subscriptionRepo, abacateClient, userRepo, cfg.Subscription.ProductID, cfg.Subscription.RenewalGrace)
+		subscriptionUC := usecase.NewSubscriptionUsecase(subscriptionRepo, stripeClient, userRepo, cfg.Subscription.StripePriceID, cfg.Subscription.RenewalGrace)
 		subscriptionUC.SetDevOpsNotifier(devOpsNotifier)
 		subscriptionHandler = handler.NewSubscriptionHandler(
 			subscriptionUC,
 			handler.WebhookSecurity{
-				Secret:  cfg.Subscription.WebhookSecret,
-				HMACKey: cfg.Subscription.WebhookHMACKey,
+				StripeWebhookSecret: cfg.Subscription.StripeWebhookSecret,
 			},
 			entitlementChecker,
 		)
@@ -324,7 +322,7 @@ func main() {
 	r.Get("/sync/v1/vaults/{vaultID}/collab", collabHandler.Connect)
 
 	if cfg.Subscription.Enabled {
-		r.Post("/webhooks/abacatepay", subscriptionHandler.HandleWebhook)
+		r.Post("/webhooks/stripe", subscriptionHandler.HandleWebhook)
 	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)

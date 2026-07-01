@@ -31,14 +31,12 @@ type DevOpsConfig struct {
 }
 
 type SubscriptionConfig struct {
-	Enabled           bool
-	APIKey            string
-	ProductID         string
-	WebhookSecret     string
-	WebhookHMACKey    string
-	CacheTTL          time.Duration
-	RenewalGrace      time.Duration
-	AbacatePayBaseURL string
+	Enabled             bool
+	StripeSecretKey     string
+	StripePriceID       string
+	StripeWebhookSecret string
+	CacheTTL            time.Duration
+	RenewalGrace        time.Duration
 }
 
 type SyncConfig struct {
@@ -185,14 +183,12 @@ func Load() (*Config, error) {
 			MaxBufBytes:     v.GetInt("collab.max_buf_bytes"),
 		},
 		Subscription: SubscriptionConfig{
-			Enabled:           v.GetBool("subscription.enabled"),
-			APIKey:            v.GetString("subscription.api_key"),
-			ProductID:         v.GetString("subscription.product_id"),
-			WebhookSecret:     v.GetString("subscription.webhook_secret"),
-			WebhookHMACKey:    v.GetString("subscription.webhook_hmac_key"),
-			CacheTTL:          v.GetDuration("subscription.cache_ttl"),
-			RenewalGrace:      v.GetDuration("subscription.renewal_grace"),
-			AbacatePayBaseURL: v.GetString("subscription.abacatepay_base_url"),
+			Enabled:             v.GetBool("subscription.enabled"),
+			StripeSecretKey:     v.GetString("subscription.stripe_secret_key"),
+			StripePriceID:       v.GetString("subscription.stripe_price_id"),
+			StripeWebhookSecret: v.GetString("subscription.stripe_webhook_secret"),
+			CacheTTL:            v.GetDuration("subscription.cache_ttl"),
+			RenewalGrace:        v.GetDuration("subscription.renewal_grace"),
 		},
 		DevOps: DevOpsConfig{
 			DiscordWebhookURL: strings.TrimSpace(v.GetString("devops.discord_webhook_url")),
@@ -254,13 +250,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("collab.max_buf_bytes", 4*1024*1024)
 
 	v.SetDefault("subscription.enabled", false)
-	v.SetDefault("subscription.api_key", "")
-	v.SetDefault("subscription.product_id", "")
-	v.SetDefault("subscription.webhook_secret", "")
-	v.SetDefault("subscription.webhook_hmac_key", "")
+	v.SetDefault("subscription.stripe_secret_key", "")
+	v.SetDefault("subscription.stripe_price_id", "")
+	v.SetDefault("subscription.stripe_webhook_secret", "")
 	v.SetDefault("subscription.cache_ttl", time.Minute)
 	v.SetDefault("subscription.renewal_grace", 48*time.Hour)
-	v.SetDefault("subscription.abacatepay_base_url", "https://api.abacatepay.com/v2")
 
 	v.SetDefault("devops.discord_webhook_url", "")
 	v.SetDefault("devops.discord_username", "Cortex DevOps")
@@ -529,17 +523,14 @@ func (cfg *Config) Validate() error {
 			return fmt.Errorf("production cannot use fake repositories")
 		}
 		if cfg.Subscription.Enabled {
-			if cfg.Subscription.APIKey == "" {
-				return fmt.Errorf("production subscription api key is required when subscription is enabled")
+			if cfg.Subscription.StripeSecretKey == "" {
+				return fmt.Errorf("production subscription stripe secret key is required when subscription is enabled")
 			}
-			if cfg.Subscription.ProductID == "" {
-				return fmt.Errorf("production subscription product id is required when subscription is enabled")
+			if cfg.Subscription.StripePriceID == "" {
+				return fmt.Errorf("production subscription stripe price id is required when subscription is enabled")
 			}
-			if cfg.Subscription.WebhookSecret == "" {
-				return fmt.Errorf("production subscription webhook secret is required when subscription is enabled")
-			}
-			if cfg.Subscription.WebhookHMACKey == "" {
-				return fmt.Errorf("production subscription webhook hmac key is required when subscription is enabled")
+			if cfg.Subscription.StripeWebhookSecret == "" {
+				return fmt.Errorf("production subscription stripe webhook secret is required when subscription is enabled")
 			}
 		}
 		if cfg.DevOps.DiscordWebhookURL != "" && !strings.HasPrefix(cfg.DevOps.DiscordWebhookURL, "https://discord.com/api/webhooks/") {

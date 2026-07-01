@@ -63,8 +63,13 @@ type CollabBroker interface {
 }
 
 type SubscriptionGateway interface {
-	CreateCustomer(ctx context.Context, email string) (customerID string, err error)
+	CreateCustomer(ctx context.Context, input SubscriptionCustomerInput) (customerID string, err error)
 	CreateSubscriptionCheckout(ctx context.Context, input SubscriptionCheckoutInput) (*SubscriptionCheckout, error)
+}
+
+type SubscriptionCustomerInput struct {
+	UserID uuid.UUID
+	Email  string
 }
 
 type SubscriptionCheckoutInput struct {

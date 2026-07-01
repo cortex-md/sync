@@ -14,6 +14,7 @@ require (
 	github.com/rs/zerolog v1.34.0
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
+	github.com/stripe/stripe-go/v86 v86.1.0
 	golang.org/x/crypto v0.50.0
 	golang.org/x/time v0.14.0
 	nhooyr.io/websocket v1.8.17

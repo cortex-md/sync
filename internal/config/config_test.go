@@ -36,13 +36,11 @@ func clearStorageEnv(t *testing.T) {
 		"CORTEX_CORS_ALLOW_CREDENTIALS",
 		"CORTEX_DATABASE_URL",
 		"CORTEX_SUBSCRIPTION_ENABLED",
-		"CORTEX_SUBSCRIPTION_API_KEY",
-		"CORTEX_SUBSCRIPTION_PRODUCT_ID",
-		"CORTEX_SUBSCRIPTION_WEBHOOK_SECRET",
-		"CORTEX_SUBSCRIPTION_WEBHOOK_HMAC_KEY",
+		"CORTEX_SUBSCRIPTION_STRIPE_SECRET_KEY",
+		"CORTEX_SUBSCRIPTION_STRIPE_PRICE_ID",
+		"CORTEX_SUBSCRIPTION_STRIPE_WEBHOOK_SECRET",
 		"CORTEX_SUBSCRIPTION_CACHE_TTL",
 		"CORTEX_SUBSCRIPTION_RENEWAL_GRACE",
-		"CORTEX_SUBSCRIPTION_ABACATEPAY_BASE_URL",
 		"CORTEX_DEVOPS_DISCORD_WEBHOOK_URL",
 		"CORTEX_DEVOPS_DISCORD_USERNAME",
 		"CORTEX_DEVOPS_DISCORD_TIMEOUT",
@@ -284,7 +282,7 @@ func TestLoadRejectsProductionSubscriptionWithoutSecrets(t *testing.T) {
 
 	require.Nil(t, cfg)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "subscription api key")
+	require.Contains(t, err.Error(), "subscription stripe secret key")
 }
 
 func TestLoadAcceptsProductionSubscriptionSecrets(t *testing.T) {
@@ -294,16 +292,17 @@ func TestLoadAcceptsProductionSubscriptionSecrets(t *testing.T) {
 	t.Setenv("CORTEX_AUTH_REGISTRATION_MODE", "first-user")
 	t.Setenv("CORTEX_DATABASE_URL", "postgres://cortex:secret@postgres:5432/cortex_sync?sslmode=disable")
 	t.Setenv("CORTEX_SUBSCRIPTION_ENABLED", "true")
-	t.Setenv("CORTEX_SUBSCRIPTION_API_KEY", "abacate-key")
-	t.Setenv("CORTEX_SUBSCRIPTION_PRODUCT_ID", "prod_123")
-	t.Setenv("CORTEX_SUBSCRIPTION_WEBHOOK_SECRET", "webhook-secret")
-	t.Setenv("CORTEX_SUBSCRIPTION_WEBHOOK_HMAC_KEY", "webhook-hmac")
+	t.Setenv("CORTEX_SUBSCRIPTION_STRIPE_SECRET_KEY", "sk_test_123")
+	t.Setenv("CORTEX_SUBSCRIPTION_STRIPE_PRICE_ID", "price_123")
+	t.Setenv("CORTEX_SUBSCRIPTION_STRIPE_WEBHOOK_SECRET", "whsec_123")
 
 	cfg, err := Load()
 
 	require.NoError(t, err)
 	require.True(t, cfg.Subscription.Enabled)
-	require.Equal(t, "https://api.abacatepay.com/v2", cfg.Subscription.AbacatePayBaseURL)
+	require.Equal(t, "sk_test_123", cfg.Subscription.StripeSecretKey)
+	require.Equal(t, "price_123", cfg.Subscription.StripePriceID)
+	require.Equal(t, "whsec_123", cfg.Subscription.StripeWebhookSecret)
 	require.Equal(t, time.Minute, cfg.Subscription.CacheTTL)
 }
 

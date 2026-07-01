@@ -40,7 +40,7 @@ docker logs cortex-sync
 
 ### Local development env
 
-Create a private `.env.local` when you need optional development credentials such as Abacate Pay or
+Create a private `.env.local` when you need optional development credentials such as Stripe or
 Discord DevOps webhooks:
 
 ```bash
@@ -51,7 +51,7 @@ cp .env.local.example .env.local
 default. You can point Make at another file with `ENV_FILE`:
 
 ```bash
-make ENV_FILE=.env.abacate docker-up
+make ENV_FILE=.env.stripe docker-up
 ```
 
 If you run Docker Compose directly, pass the file explicitly:

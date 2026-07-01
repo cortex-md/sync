@@ -21,7 +21,7 @@ cortex-sync migrate version # Print migration version
 ```
 
 Local dev envs live in `.env.local`, copied from `.env.local.example`. The Makefile loads it by
-default for `make run` and Docker targets; use `make ENV_FILE=.env.abacate docker-up` for alternate
+default for `make run` and Docker targets; use `make ENV_FILE=.env.stripe docker-up` for alternate
 credential sets. Direct Docker Compose usage should pass `--env-file .env.local`.
 
 ## Project Structure
@@ -175,13 +175,11 @@ All config via environment variables with `CORTEX_` prefix, or `config.yaml` fil
 | CORTEX_COLLAB_MAX_PEERS_PER_ROOM | 10 | Max concurrent WebSocket peers per collab room |
 | CORTEX_COLLAB_FLUSH_INTERVAL | 10s | How often buffered Yjs updates are flushed to the database |
 | CORTEX_SUBSCRIPTION_ENABLED | false | Enable Cortex Cloud subscription enforcement |
-| CORTEX_SUBSCRIPTION_API_KEY | | Abacate Pay API key, required in production when subscription is enabled |
-| CORTEX_SUBSCRIPTION_PRODUCT_ID | | Abacate Pay product ID used for subscription checkout items |
-| CORTEX_SUBSCRIPTION_WEBHOOK_SECRET | | Query secret required on Abacate Pay webhook requests |
-| CORTEX_SUBSCRIPTION_WEBHOOK_HMAC_KEY | | HMAC key for `X-Webhook-Signature` validation |
+| CORTEX_SUBSCRIPTION_STRIPE_SECRET_KEY | | Stripe secret key, required in production when subscription is enabled |
+| CORTEX_SUBSCRIPTION_STRIPE_PRICE_ID | | Stripe recurring price ID used for Checkout subscription line items |
+| CORTEX_SUBSCRIPTION_STRIPE_WEBHOOK_SECRET | | Stripe webhook endpoint secret for `Stripe-Signature` validation |
 | CORTEX_SUBSCRIPTION_CACHE_TTL | 60s | Maximum positive entitlement cache lifetime |
 | CORTEX_SUBSCRIPTION_RENEWAL_GRACE | 48h | Grace added after each billing period before entitlement expires |
-| CORTEX_SUBSCRIPTION_ABACATEPAY_BASE_URL | https://api.abacatepay.com/v2 | Abacate Pay API base URL |
 | CORTEX_DEVOPS_DISCORD_WEBHOOK_URL | | Optional Discord webhook for DevOps account, auth, and billing notifications |
 | CORTEX_DEVOPS_DISCORD_USERNAME | Cortex DevOps | Discord webhook display username |
 | CORTEX_DEVOPS_DISCORD_TIMEOUT | 5s | Discord webhook request timeout |
@@ -225,7 +223,7 @@ notifications, so failed notifications fall back to the short TTL.
   - REST presence endpoint (`GET /sync/v1/vaults/{vaultID}/collab/peers`)
   - Config-driven `MaxPeersPerRoom` and `FlushInterval`
 - Vault encryption endpoints (GET/POST `/sync/v1/vaults/{vaultID}/encryption`) for E2E encryption key management
-- Optional Cortex Cloud subscription gate with Abacate Pay v2 checkout, secure HMAC webhooks,
+- Optional Cortex Cloud subscription gate with Stripe Checkout, signed Stripe webhooks,
   entitlement expiry, positive local cache, and PostgreSQL cache invalidation.
 - Optional Discord DevOps notifications for account creation, suspicious device reuse, checkout
   creation, and subscription lifecycle events; delivery failures are warn-only and never block users.

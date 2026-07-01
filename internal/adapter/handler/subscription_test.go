@@ -2,10 +2,8 @@ package handler_test
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,20 +20,23 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	stripe "github.com/stripe/stripe-go/v86"
 )
 
 type fakeGateway struct {
-	customerID  string
-	checkoutURL string
-	checkoutID  string
-	err         error
-	input       port.SubscriptionCheckoutInput
+	customerID    string
+	checkoutURL   string
+	checkoutID    string
+	err           error
+	customerInput port.SubscriptionCustomerInput
+	input         port.SubscriptionCheckoutInput
 }
 
-func (g *fakeGateway) CreateCustomer(_ context.Context, _ string) (string, error) {
+func (g *fakeGateway) CreateCustomer(_ context.Context, input port.SubscriptionCustomerInput) (string, error) {
 	if g.err != nil {
 		return "", g.err
 	}
+	g.customerInput = input
 	return g.customerID, nil
 }
 
@@ -70,12 +71,12 @@ func newSubscriptionTestHarness() *subscriptionTestHarness {
 
 	authUC := usecase.NewAuthUsecase(userRepo, deviceRepo, refreshTokenRepo, hasher, tokenGen, 90*24*time.Hour)
 	entitlementChecker := handler.NewEntitlementChecker(subRepo, time.Second)
-	subscriptionUC := usecase.NewSubscriptionUsecase(subRepo, gateway, userRepo, "prod_test", 48*time.Hour)
+	subscriptionUC := usecase.NewSubscriptionUsecase(subRepo, gateway, userRepo, "price_test", 48*time.Hour)
 
 	authHandler := handler.NewAuthHandler(authUC)
 	subscriptionHandler := handler.NewSubscriptionHandler(
 		subscriptionUC,
-		handler.WebhookSecurity{Secret: "webhook-secret", HMACKey: "webhook-hmac"},
+		handler.WebhookSecurity{StripeWebhookSecret: "whsec_test"},
 		entitlementChecker,
 	)
 
@@ -84,7 +85,7 @@ func newSubscriptionTestHarness() *subscriptionTestHarness {
 		r.Post("/register", authHandler.Register)
 		r.Post("/login", authHandler.Login)
 	})
-	r.Post("/webhooks/abacatepay", subscriptionHandler.HandleWebhook)
+	r.Post("/webhooks/stripe", subscriptionHandler.HandleWebhook)
 	r.Group(func(r chi.Router) {
 		r.Use(handler.AuthMiddleware(tokenGen))
 		r.Use(handler.DeviceMiddleware)
@@ -107,9 +108,11 @@ func newSubscriptionTestHarness() *subscriptionTestHarness {
 }
 
 func signedWebhookRequestBody(body string) (path string, signature string) {
-	mac := hmac.New(sha256.New, []byte("webhook-hmac"))
-	mac.Write([]byte(body))
-	return "/webhooks/abacatepay?webhookSecret=webhook-secret", base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	payload := stripe.GenerateTestSignedPayload(&stripe.UnsignedPayload{
+		Payload: []byte(body),
+		Secret:  "whsec_test",
+	})
+	return "/webhooks/stripe", payload.Header
 }
 
 func subDoWebhookRequest(h *subscriptionTestHarness, body string) *httptest.ResponseRecorder {
@@ -117,9 +120,43 @@ func subDoWebhookRequest(h *subscriptionTestHarness, body string) *httptest.Resp
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Webhook-Signature", signature)
+	req.Header.Set("Stripe-Signature", signature)
 	h.router.ServeHTTP(rec, req)
 	return rec
+}
+
+func stripeEventBody(eventID string, eventType string, object string) string {
+	return fmt.Sprintf(
+		`{"id":%q,"object":"event","api_version":%q,"created":1768478400,"type":%q,"data":{"object":%s}}`,
+		eventID,
+		stripe.APIVersion,
+		eventType,
+		object,
+	)
+}
+
+func stripeSubscriptionObject(subID string, customerID string, localSubscriptionID string, status string, priceID string, periodStart int64, periodEnd int64) string {
+	return fmt.Sprintf(
+		`{"id":%q,"object":"subscription","customer":%q,"status":%q,"metadata":{"subscription_id":%q},"items":{"object":"list","data":[{"id":"si_test","object":"subscription_item","current_period_start":%d,"current_period_end":%d,"price":{"id":%q,"object":"price","recurring":{"interval":"month","interval_count":1}}}]}}`,
+		subID,
+		customerID,
+		status,
+		localSubscriptionID,
+		periodStart,
+		periodEnd,
+		priceID,
+	)
+}
+
+func stripeCheckoutSessionObject(checkoutID string, customerID string, externalSubscriptionID string, localSubscriptionID string) string {
+	return fmt.Sprintf(
+		`{"id":%q,"object":"checkout.session","client_reference_id":%q,"customer":%q,"mode":"subscription","subscription":%q,"metadata":{"subscription_id":%q}}`,
+		checkoutID,
+		localSubscriptionID,
+		customerID,
+		externalSubscriptionID,
+		localSubscriptionID,
+	)
 }
 
 func subRegisterAndLogin(t *testing.T, h *subscriptionTestHarness) (token string, userID uuid.UUID, deviceID string) {
@@ -289,6 +326,8 @@ func TestWebhook_Handler(t *testing.T) {
 
 	now := time.Now()
 	externalSubID := "sub_webhook_test"
+	periodStart := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	periodEnd := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
 	sub := &domain.Subscription{
 		ID:                     uuid.New(),
 		UserID:                 userID,
@@ -300,13 +339,87 @@ func TestWebhook_Handler(t *testing.T) {
 	}
 	require.NoError(t, h.subRepo.Create(context.Background(), sub))
 
-	webhookBody := `{"id":"evt_webhook","data":{"subscription":{"id":"` + externalSubID + `","status":"ACTIVE","frequency":"MONTHLY","updatedAt":"2026-01-15T12:00:00Z"}},"event":"subscription.completed"}`
+	webhookBody := stripeEventBody(
+		"evt_webhook",
+		"customer.subscription.updated",
+		stripeSubscriptionObject(externalSubID, "cust_test", sub.ID.String(), "active", "price_test", periodStart.Unix(), periodEnd.Unix()),
+	)
 	rec := subDoWebhookRequest(h, webhookBody)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	updated, err := h.subRepo.GetByUserID(context.Background(), userID)
 	require.NoError(t, err)
 	assert.Equal(t, domain.SubscriptionStatusActive, updated.Status)
+	assert.Equal(t, periodStart, updated.CurrentPeriodStart)
+	assert.Equal(t, periodEnd, updated.CurrentPeriodEnd)
+	assert.Equal(t, "price_test", updated.PlanProductID)
+}
+
+func TestWebhook_Handler_CheckoutSessionCompletedLinksStripeIDs(t *testing.T) {
+	h := newSubscriptionTestHarness()
+	_, userID, _ := subRegisterAndLogin(t, h)
+
+	now := time.Now()
+	sub := &domain.Subscription{
+		ID:                 uuid.New(),
+		UserID:             userID,
+		ExternalCustomerID: "cust_test",
+		Status:             domain.SubscriptionStatusPending,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+	require.NoError(t, h.subRepo.Create(context.Background(), sub))
+
+	webhookBody := stripeEventBody(
+		"evt_checkout_completed",
+		"checkout.session.completed",
+		stripeCheckoutSessionObject("cs_test", "cust_test", "sub_test", sub.ID.String()),
+	)
+	rec := subDoWebhookRequest(h, webhookBody)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	updated, err := h.subRepo.GetByUserID(context.Background(), userID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.SubscriptionStatusPending, updated.Status)
+	assert.Equal(t, "cs_test", updated.ExternalCheckoutID)
+	assert.Equal(t, "sub_test", updated.ExternalSubscriptionID)
+}
+
+func TestWebhook_Handler_CancelledSubscriptionRemovesEntitlement(t *testing.T) {
+	h := newSubscriptionTestHarness()
+	_, userID, _ := subRegisterAndLogin(t, h)
+
+	now := time.Now()
+	externalSubID := "sub_cancelled_test"
+	periodStart := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	periodEnd := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
+	sub := &domain.Subscription{
+		ID:                     uuid.New(),
+		UserID:                 userID,
+		ExternalCustomerID:     "cust_test",
+		ExternalSubscriptionID: externalSubID,
+		Status:                 domain.SubscriptionStatusActive,
+		CurrentPeriodStart:     periodStart,
+		CurrentPeriodEnd:       periodEnd.AddDate(0, 1, 0),
+		EntitlementExpiresAt:   periodEnd.AddDate(0, 1, 0).Add(48 * time.Hour),
+		CreatedAt:              now,
+		UpdatedAt:              now,
+	}
+	require.NoError(t, h.subRepo.Create(context.Background(), sub))
+
+	webhookBody := stripeEventBody(
+		"evt_cancelled",
+		"customer.subscription.deleted",
+		stripeSubscriptionObject(externalSubID, "cust_test", sub.ID.String(), "canceled", "price_test", periodStart.Unix(), periodEnd.Unix()),
+	)
+	rec := subDoWebhookRequest(h, webhookBody)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	updated, err := h.subRepo.GetByUserID(context.Background(), userID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.SubscriptionStatusCancelled, updated.Status)
+	assert.Equal(t, periodEnd, updated.CurrentPeriodEnd)
+	assert.Equal(t, periodEnd, updated.EntitlementExpiresAt)
 }
 
 func TestWebhook_Handler_InvalidPayload(t *testing.T) {
@@ -319,25 +432,23 @@ func TestWebhook_Handler_InvalidPayload(t *testing.T) {
 func TestWebhook_Handler_MissingID(t *testing.T) {
 	h := newSubscriptionTestHarness()
 
-	rec := subDoWebhookRequest(h, `{"data":{},"event":"subscription.completed"}`)
+	rec := subDoWebhookRequest(h, `{"object":"event","data":{},"type":"customer.subscription.updated"}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestWebhook_Handler_MissingSubscriptionIdentifiers(t *testing.T) {
 	h := newSubscriptionTestHarness()
 
-	rec := subDoWebhookRequest(h, `{"id":"evt_missing_ids","data":{},"event":"subscription.completed"}`)
+	rec := subDoWebhookRequest(h, stripeEventBody("evt_missing_ids", "customer.subscription.updated", `{"object":"subscription","status":"active"}`))
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-func TestWebhook_Handler_InvalidSecret(t *testing.T) {
+func TestWebhook_Handler_MissingSignature(t *testing.T) {
 	h := newSubscriptionTestHarness()
-	body := `{"id":"evt_secret","data":{},"event":"subscription.completed"}`
-	_, signature := signedWebhookRequestBody(body)
+	body := stripeEventBody("evt_missing_signature", "customer.subscription.updated", `{"id":"sub_test","object":"subscription"}`)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/webhooks/abacatepay?webhookSecret=wrong", strings.NewReader(body))
-	req.Header.Set("X-Webhook-Signature", signature)
+	req := httptest.NewRequest("POST", "/webhooks/stripe", strings.NewReader(body))
 	h.router.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
@@ -345,11 +456,11 @@ func TestWebhook_Handler_InvalidSecret(t *testing.T) {
 
 func TestWebhook_Handler_InvalidSignature(t *testing.T) {
 	h := newSubscriptionTestHarness()
-	body := `{"id":"evt_signature","data":{},"event":"subscription.completed"}`
+	body := stripeEventBody("evt_signature", "customer.subscription.updated", `{"id":"sub_test","object":"subscription"}`)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/webhooks/abacatepay?webhookSecret=webhook-secret", strings.NewReader(body))
-	req.Header.Set("X-Webhook-Signature", "bad")
+	req := httptest.NewRequest("POST", "/webhooks/stripe", strings.NewReader(body))
+	req.Header.Set("Stripe-Signature", "bad")
 	h.router.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
@@ -372,7 +483,11 @@ func TestWebhook_Handler_DuplicateEvent(t *testing.T) {
 	}
 	require.NoError(t, h.subRepo.Create(context.Background(), sub))
 
-	webhookBody := `{"id":"evt_duplicate","data":{"subscription":{"id":"` + externalSubID + `","status":"ACTIVE","frequency":"MONTHLY","updatedAt":"2026-01-15T12:00:00Z"}},"event":"subscription.completed"}`
+	webhookBody := stripeEventBody(
+		"evt_duplicate",
+		"customer.subscription.updated",
+		stripeSubscriptionObject(externalSubID, "cust_test", sub.ID.String(), "active", "price_test", 1767225600, 1769904000),
+	)
 	first := subDoWebhookRequest(h, webhookBody)
 	second := subDoWebhookRequest(h, webhookBody)
 

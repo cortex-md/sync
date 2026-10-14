@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cortexnotes/cortex-sync/internal/adapter/fake"
 	"github.com/cortexnotes/cortex-sync/internal/domain"
 	"github.com/cortexnotes/cortex-sync/internal/job"
+	"github.com/cortexnotes/cortex-sync/internal/platform/fake"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,7 +37,7 @@ func TestCleaner_DeletesExpiredRefreshTokens(t *testing.T) {
 	require.NoError(t, tokenRepo.Create(context.Background(), expired))
 	require.NoError(t, tokenRepo.Create(context.Background(), active))
 
-	cleaner := job.NewCleaner(tokenRepo, inviteRepo, time.Hour)
+	cleaner := job.NewCleaner(job.CleanerConfig{Interval: time.Hour, Tasks: []job.CleanupTask{job.ExpiredRefreshTokens(tokenRepo), job.ExpiredInvites(inviteRepo)}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -77,7 +77,7 @@ func TestCleaner_DeletesExpiredInvites(t *testing.T) {
 	require.NoError(t, inviteRepo.Create(context.Background(), expiredInvite))
 	require.NoError(t, inviteRepo.Create(context.Background(), activeInvite))
 
-	cleaner := job.NewCleaner(tokenRepo, inviteRepo, time.Hour)
+	cleaner := job.NewCleaner(job.CleanerConfig{Interval: time.Hour, Tasks: []job.CleanupTask{job.ExpiredRefreshTokens(tokenRepo), job.ExpiredInvites(inviteRepo)}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -94,7 +94,7 @@ func TestCleaner_StopsOnContextCancel(t *testing.T) {
 	tokenRepo := fake.NewRefreshTokenRepository()
 	inviteRepo := fake.NewVaultInviteRepository()
 
-	cleaner := job.NewCleaner(tokenRepo, inviteRepo, 10*time.Second)
+	cleaner := job.NewCleaner(job.CleanerConfig{Interval: 10 * time.Second, Tasks: []job.CleanupTask{job.ExpiredRefreshTokens(tokenRepo), job.ExpiredInvites(inviteRepo)}})
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -146,8 +146,7 @@ func TestCleaner_DeletesOldSyncEvents(t *testing.T) {
 	require.NoError(t, eventRepo.Create(context.Background(), old))
 	require.NoError(t, eventRepo.Create(context.Background(), recent))
 
-	cleaner := job.NewCleaner(tokenRepo, inviteRepo, time.Hour)
-	cleaner.SetSyncEvents(eventRepo, 30*24*time.Hour)
+	cleaner := job.NewCleaner(job.CleanerConfig{Interval: time.Hour, Tasks: []job.CleanupTask{job.ExpiredRefreshTokens(tokenRepo), job.ExpiredInvites(inviteRepo), job.OldSyncEvents(eventRepo, 30*24*time.Hour)}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -180,8 +179,7 @@ func TestCleaner_ZeroRetentionSkipsSyncEventCleanup(t *testing.T) {
 	}
 	require.NoError(t, eventRepo.Create(context.Background(), old))
 
-	cleaner := job.NewCleaner(tokenRepo, inviteRepo, time.Hour)
-	cleaner.SetSyncEvents(eventRepo, 0)
+	cleaner := job.NewCleaner(job.CleanerConfig{Interval: time.Hour, Tasks: []job.CleanupTask{job.ExpiredRefreshTokens(tokenRepo), job.ExpiredInvites(inviteRepo), job.OldSyncEvents(eventRepo, 0)}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()

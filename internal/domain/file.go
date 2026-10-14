@@ -33,16 +33,40 @@ type FileDelta struct {
 }
 
 type FileLatest struct {
-	VaultID               uuid.UUID
-	FilePath              string
-	CurrentVersion        int
-	LatestSnapshotVersion int
-	Checksum              string
-	SizeBytes             int64
-	ContentType           string
-	Deleted               bool
-	LastModifiedBy        uuid.UUID
-	LastDeviceID          uuid.UUID
-	UpdatedAt             time.Time
-	CreatedAt             time.Time
+	VaultID                 uuid.UUID
+	FilePath                string
+	CurrentVersion          int
+	LatestSnapshotVersion   int
+	Checksum                string
+	SizeBytes               int64
+	ContentType             string
+	Deleted                 bool
+	LastModifiedBy          uuid.UUID
+	LastDeviceID            uuid.UUID
+	CreatedBy               uuid.UUID
+	DeltasSinceSnapshot     int
+	DeltaBytesSinceSnapshot int64
+	UpdatedAt               time.Time
+	CreatedAt               time.Time
+}
+
+type HistoryEntry struct {
+	FileSnapshot
+	AuthorName      string
+	AuthorAvatarKey string
+	DeviceName      string
+}
+
+type BlobDeletion struct {
+	ID       int64
+	Key      string
+	Attempts int
+}
+
+type FileListQuery struct {
+	VaultID        uuid.UUID
+	IncludeDeleted bool
+	AfterPath      string
+	Limit          int
+	Scope          Scope
 }

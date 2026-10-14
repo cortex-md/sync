@@ -1,0 +1,10 @@
+{{define "subject"}}Your Cortex email is changing{{end}}
+{{define "text"}}Hi {{.DisplayName}},
+
+A request was made to change the email of your Cortex account to {{.NewEmail}}.
+
+If this was not you, change your password right away.{{end}}
+{{define "preheader"}}A request was made to change your Cortex email.{{end}}
+{{define "heading"}}Your email is changing{{end}}
+{{define "body"}}<p style="margin:0">Hi {{.DisplayName}}, a request was made to change the email of your Cortex account to <strong>{{.NewEmail}}</strong>.</p>{{end}}
+{{define "note"}}If this was not you, change your password right away.{{end}}

@@ -1,0 +1,10 @@
+{{define "subject"}}{{.InviteeEmail}} declined your invite to "{{.VaultName}}"{{end}}
+{{define "text"}}Hi {{.DisplayName}},
+
+{{.InviteeEmail}} declined your invite to the vault "{{.VaultName}}".
+
+You can send a new invite any time from the vault members in Cortex.{{end}}
+{{define "preheader"}}{{.InviteeEmail}} won't join "{{.VaultName}}" for now.{{end}}
+{{define "heading"}}Your invite was declined{{end}}
+{{define "body"}}<p style="margin:0">Hi {{.DisplayName}}, <strong>{{.InviteeEmail}}</strong> declined your invite to the vault <strong>{{.VaultName}}</strong>.</p>{{end}}
+{{define "note"}}You can send a new invite any time from the vault members in Cortex.{{end}}

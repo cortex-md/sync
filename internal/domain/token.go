@@ -16,3 +16,22 @@ type RefreshToken struct {
 	Revoked   bool
 	CreatedAt time.Time
 }
+
+type UserTokenKind string
+
+const (
+	UserTokenEmailVerify   UserTokenKind = "email_verify"
+	UserTokenEmailChange   UserTokenKind = "email_change"
+	UserTokenPasswordReset UserTokenKind = "password_reset"
+)
+
+type UserToken struct {
+	ID        uuid.UUID
+	UserID    uuid.UUID
+	Kind      UserTokenKind
+	TokenHash string
+	Payload   string
+	ExpiresAt time.Time
+	UsedAt    *time.Time
+	CreatedAt time.Time
+}

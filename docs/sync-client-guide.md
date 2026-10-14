@@ -16,7 +16,7 @@ The server is **opaque encrypted blob storage**. It never sees plaintext file co
 There are two distinct layers:
 
 - **Layer 1 — File sync**: snapshot and delta uploads/downloads, SSE events, E2EE. This is the durable persistence layer.
-- **Layer 2 — Real-time collab**: Yjs CRDT over WebSocket for simultaneous co-editing. E2EE is relaxed during active sessions; the final state is encrypted and persisted through Layer 1 when the session ends.
+- **Layer 2 — Real-time collab**: Yjs CRDT over WebSocket for simultaneous co-editing. Every payload is end-to-end encrypted with a key derived from the VEK; the file itself is still persisted through Layer 1.
 
 ---
 
@@ -33,20 +33,44 @@ The device is registered implicitly on login (`POST /auth/v1/login`) with `devic
 - **Access token**: JWT, 15-minute lifetime. Sent as `Authorization: Bearer <token>`.
 - **Refresh token**: Opaque, valid for 90 days. Rotated on every use — each use issues a new pair. Reuse detection revokes the entire token family (theft protection).
 
+### Password and identity keys
+
+The account password never leaves the client. Before login or register, call
+`POST /auth/v1/prelogin {email}`:
+
+- `kdf_version: 1`: derive `master = Argon2id(password, kdf_salt, 65536 KiB, 3 iterations,
+  parallelism 1, 32 bytes)`, then `authKey = HKDF-SHA256(master, info "cortex/auth/v1")` and
+  `wrapKey = HKDF-SHA256(master, info "cortex/wrap/v1")`. Send `authKey` (base64url, no padding) as
+  `password`. Unwrap `encrypted_private_key` from the login response with `wrapKey`.
+- `kdf_version: 0` (legacy account): send the raw password, then immediately call
+  `PUT /account/v1/me/keys` with a fresh salt, X25519 identity, wrapped private key and recovery wrap,
+  and show the recovery key once.
+
+Register new accounts with `kdf_salt`, `public_key`, `encrypted_private_key` and
+`recovery_wrapped_private_key`. Keep the identity private key only in the OS secret store and clear
+it on logout. A password change sends a new salt and the re-wrapped private key; a password reset
+(`cortex://reset-password?token=&server=` deep link) calls `POST /account/v1/password/reset/prepare`
+to get the recovery wrap, unwraps it with the recovery key and resets with the new key fields. If no
+recovery key is available, generate a new identity: the server drops the user's vault keys and
+emits `member_key_changed` so admins grant them again.
+
 **Rule:** the sync engine must renew the access token **proactively** before it expires, not reactively after receiving a 401. On receiving a 401, attempt refresh once. If the refresh also fails with `token_revoked` or `token_reuse`, emit a `SyncAuthRequired` event to the frontend — the user must log in again.
 
 ---
 
-## 3. Sync Cursor per Device
+## 3. Sync Cursor per Vault
 
-The server maintains a `last_sync_event_id` per device. After each sync session, the client must persist the ID of the last SSE event received and update it on the server:
+The client keeps its event cursor locally and reports it per vault so other screens can show when
+each device last synced:
 
 ```
-PUT /devices/v1/{deviceID}/sync-cursor
-{ "last_sync_event_id": 4821 }
+PUT /sync/v1/vaults/{vaultID}/cursor
+{ "last_event_id": 4821 }
 ```
 
-This allows the client to know exactly where to resume on reconnect. Use the `Last-Event-ID` header in SSE for replay, and update the cursor on the server **after confirming** that the events were successfully processed (not before).
+Seed the cursor from the `X-Latest-Event-ID` header of `GET /files/list` after a full sync. Use the
+`Last-Event-ID` header in SSE for replay, and advance the cursor **after confirming** that the
+events were successfully processed (not before).
 
 ---
 
@@ -197,9 +221,32 @@ The server **never** sees plaintext content. All encryption happens on the clien
 
 ### Vault encryption key (VEK)
 
-Generated randomly on sync activation. Stored in the OS keychain. Never sent to the server in plaintext.
+Generated randomly when the vault is created. Stored in the OS keychain. Never sent to the server in
+plaintext.
 
-The server stores the encrypted VEK (EVEK) derived from a user-supplied password, to allow recovery on a new device.
+Each member gets the VEK sealed to their X25519 public key (`vault_keys`, opaque to the server):
+`eph = X25519 keypair`, `k = HKDF-SHA256(X25519(eph, recipientPub), salt = eph.pub || recipientPub,
+info "cortex/vek-seal/v1")`, blob = `0x01 || eph.pub || AES-256-GCM(k)`.
+
+- On vault creation, seal the VEK to your own public key and `PUT /vaults/v1/{id}/keys/me`.
+- On a new device, `GET /vaults/v1/{id}/keys/me` and unseal it. Without a key, wait for an admin
+  (`key_granted`); the legacy password-wrapped VEK (`GET /encryption`, `has_key`) is still accepted.
+- Admins holding the VEK list `GET /vaults/v1/{id}/keys/pending` on start and on `member_joined`,
+  `member_key_changed` and `access_changed`, seal the VEK to each pending member's public key and
+  grant it. Pin each member's key fingerprint on first sight and never auto-grant to a changed key.
+
+### Path access
+
+Membership gives every member the VEK; isolation between members is enforced by the server through
+path access rules (see `docs/api.md#path-access`). `GET /vaults/v1/{id}/overview` returns
+`my_access` (`all`, `base`, `rules[{path, level}]`); the effective level of a path is the level of
+the deepest rule covering it, else `base`. On the `access_changed` SSE event, refetch the overview,
+recompute access and run a full sync:
+
+- Files that became unreadable: delete the local copy if it is tracked and unmodified, otherwise keep
+  it and log.
+- Paths without `edit`: never upload. Restore server content over local divergence and log
+  "Discarded local changes to read-only X"; new local files in read-only folders stay local.
 
 ### Encrypted blob format
 
@@ -217,19 +264,31 @@ The `X-Local-Hash` sent on upload is always the hash of the **plaintext**, compu
 
 ### E2EE and collab sessions
 
-E2EE is relaxed during active collab sessions. Yjs CRDT updates travel as plaintext over the WebSocket connection. When the last peer disconnects, the client sends a compacted `Y.Doc` state (the `compact` message type), and the server stores it. The next file sync snapshot upload from any client will re-encrypt and persist the final state in the durable file sync layer.
+Collab is always end-to-end encrypted. Every binary payload a client sends (`update`, `awareness`,
+`sync_step1`, `sync_step2` and the `compact` state) is a sealed envelope:
 
-**Rule:** when a `collab_inactive` SSE event is received for a file, the local sync engine should schedule a snapshot upload of that file to ensure the latest collab state is durably persisted under E2EE.
+```
+[0x01][nonce 12 bytes][AES-256-GCM ciphertext || tag 16 bytes]
+```
+
+- Key: `HKDF-SHA256(VEK, info "cortex/collab/v1")`, 32 bytes, derived once per vault.
+- Nonce: random per envelope, never reused.
+- AAD: `utf8("cortex/collab/v1:" + vaultId)`. It does not bind the opcode or the path: the server
+  replays a stored `sync_step2` as compacted state and moves documents when a note is renamed.
+- A payload that fails to open (bad version byte, bad tag) is dropped, never applied.
+
+The server stores and relays envelopes as opaque bytes and never reads them. Compacted state and
+persisted updates in the database are ciphertext.
 
 ---
 
 ## 9. Real-time Collaboration (Collab)
 
-The collab layer enables multiple users to edit the same file simultaneously. It uses **Yjs** CRDTs over WebSocket. The server is a relay — it does not interpret CRDT internals.
+The collab layer enables multiple users to edit the same file simultaneously. It uses **Yjs** CRDTs over WebSocket. The server is an opaque relay: it does not interpret CRDT internals and only sees encrypted envelopes (section 8).
 
 ### Connecting to a collab session
 
-First request a short-lived one-time ticket over the authenticated HTTP API:
+First request a short-lived ticket over the authenticated HTTP API:
 
 ```http
 POST /sync/v1/vaults/{vaultID}/collab/tickets
@@ -243,60 +302,88 @@ Content-Type: application/json
 Then use that ticket for the WebSocket upgrade:
 
 ```
-GET /sync/v1/vaults/{vaultID}/collab?path=notes/diary.md&ticket=<collab_ticket>
+GET /sync/v1/vaults/{vaultID}/collab?path=notes/diary.md&ticket=<collab_ticket>[&frames=binary]
 Upgrade: websocket
 ```
 
-The ticket is bound to the user, vault, and path, expires quickly, and is consumed on first use. Never put the JWT access token in the WebSocket URL.
+The ticket is HMAC-signed and bound to the user, vault and path. It is valid for 60 seconds on any
+instance and can be reused within that window; request a new one for every reconnect attempt. Never
+put the JWT access token in the WebSocket URL.
 
 The connection is rejected before the WebSocket upgrade with:
-- `401` if the ticket is missing, invalid, expired, or already used.
-- `403` if the user is not a member of the vault.
-- `1008 Policy Violation` close frame if the room is full (`CORTEX_COLLAB_MAX_PEERS_PER_ROOM`, default 10).
+- `400` if `path` or `vaultID` is missing or invalid.
+- `401` if the ticket is missing, invalid or expired.
+- `403` if the user is not a member of the vault or has no `view` access to the path.
+- `503` if the instance is draining.
+
+After the upgrade the server closes the socket with:
+
+| Code | Meaning | Client action |
+|------|---------|---------------|
+| `1008` | Room full (`CORTEX_COLLAB_MAX_PEERS_PER_ROOM`, default 10) | Fall back to file sync, show "Live session full" |
+| `1001` | Server shutting down | Reconnect with backoff |
+| `1013` | Update buffer full | Reconnect with backoff |
+| `4402` | Subscription entitlement lapsed | Stop collab for the vault |
+| `4403` | Access changed (role, rules, removal) | Reconnect; a new ticket returns `403` when access was lost, otherwise `welcome.from.can_write` carries the new mode |
+| `4408` | Client too slow to drain frames | Reconnect and resync |
 
 ### Message protocol
 
-All messages are JSON text frames:
-
-```json
-{
-  "type": "sync_step1 | sync_step2 | update | awareness | compact | ping | pong",
-  "data": "<base64-encoded bytes>"
-}
-```
-
-`data` is omitted for `ping` and `pong`.
+JSON text frames by default; `data` is the base64 envelope. With `&frames=binary`, `sync_step1`,
+`sync_step2`, `update` and `awareness` travel as binary messages (client → server
+`[opcode][payload]`, server → client `[opcode][client_id len][client_id][payload]`, opcodes 1–4;
+see `docs/api.md`). Control messages are always JSON text.
 
 | Type | Direction | Description |
 |------|-----------|-------------|
-| `sync_step1` | client → server | Yjs sync state vector — writers only |
-| `sync_step2` | server → client | Full Y.Doc state sent on connect |
-| `update` | bidirectional | Incremental Yjs CRDT update — writers only |
-| `awareness` | bidirectional | Cursor/presence data, relayed to all peers |
-| `compact` | client → server | Full compacted Y.Doc state for persistence |
-| `ping` | server → client | Keepalive every 30s |
-| `pong` | client → server | Response to ping |
+| `welcome` | server → client | First frame: own `client_id`, `from` (own identity with `can_write`), `peers` and `up_to` |
+| `sync_step2` | server → client | Compacted document state sent on join |
+| `update` | bidirectional | Incremental Yjs update; dropped by the server when sent by a viewer |
+| `synced` | server → client | Last frame of the initial backlog |
+| `sync_step1` | bidirectional | Yjs state vector, relayed to peers (allowed for viewers) |
+| `awareness` | bidirectional | Cursor/presence data, relayed to all peers, never persisted |
+| `compact` | client → server | Compacted state plus `up_to`; writers only |
+| `peer_joined` / `peer_left` | server → client | Presence changes (`peer` / `client_id`) |
+| `ping` / `pong` | server ↔ client | Keepalive every 30s |
+
+Every relayed JSON frame carries a server-stamped `from`; binary frames carry the sender's
+`client_id`. Use them, never identity fields inside the payload.
 
 ### Connection lifecycle
 
-1. **On connect**: the server sends the existing compacted state as `sync_step2`, followed by any buffered incremental updates as `update` messages. The client applies them to its local `Y.Doc`.
-2. **During session**: send local Yjs updates as `update` messages. Receive and apply `update` messages from other peers.
-3. **On disconnect (last peer)**: before closing, send a `compact` message containing the full serialized `Y.Doc` state. This triggers server-side persistence: the server discards incremental updates and stores the compacted state.
+1. **Join**: the server sends `welcome`, then the compacted state as `sync_step2` (when one exists),
+   then persisted `update`s, then updates still buffered on that instance, then `{"type":"synced"}`.
+   Apply everything before `synced` as remote state; only after `synced` decide how to reconcile with
+   the local file (seed an empty document, let the disk win when alone, let the room win when peers
+   are present) and send your own `sync_step1`.
+2. **Answering `sync_step1`**: only one elected responder per room answers a peer's `sync_step1`,
+   and it answers with an `update` containing the missing state. Clients never send `sync_step2`:
+   the server would persist and rebroadcast it to every peer.
+3. **During the session**: batch local Yjs updates (for example every 40 ms) and send them as
+   `update`. Apply incoming `update`s with a remote origin.
+4. **Compaction**: a writer sends `compact` with the encrypted full state and the `up_to` received
+   in `welcome`. The server flushes buffered updates, deletes persisted updates with id <= `up_to`
+   and stores the state. Updates that arrived after `welcome` survive. The server never compacts on
+   its own; if a client crashes without compacting, the next one receives the update log and can
+   compact it.
 
 ### Read-only enforcement
 
-Viewers (role `viewer`) can connect and receive updates but their `update`, `sync_step1`, and `sync_step2` messages are silently dropped by the server. The client should still disable editing in the UI for viewer-role connections.
+Viewers (and paths without `edit` access) can connect, receive updates and send `sync_step1` and
+`awareness`. Their `update`, `sync_step2` and `compact` messages are silently dropped. Disable editing
+in the UI when `welcome.from.can_write` is `false`.
 
 ### Awareness (cursors and presence)
 
-Send cursor position and user identity as `awareness` messages. These are relayed to all other peers in the room without persistence — they are ephemeral by design. Format the `data` field according to the Yjs awareness protocol.
+Send cursor position and user state as encrypted `awareness` messages following the Yjs awareness
+protocol. They are relayed to all other peers in the room and never persisted.
 
 ### SSE events for collab
 
 The file sync SSE stream emits collab lifecycle events:
 
 - `collab_active`: published when the first peer joins a room. Data: `{"file_path":"notes/diary.md"}`. Use this to show a "live editing" indicator in the UI.
-- `collab_inactive`: published when the last peer leaves a room. Data: `{"file_path":"notes/diary.md"}`. Use this to hide the indicator and trigger a snapshot upload (see section 8).
+- `collab_inactive`: published when the last peer leaves a room. Data: `{"file_path":"notes/diary.md"}`. Use this to hide the indicator.
 
 ### Presence REST endpoint
 
@@ -314,17 +401,28 @@ Response:
   "vault_id": "uuid",
   "file_path": "notes/diary.md",
   "peer_count": 2,
-  "peer_ids": ["uuid", "uuid"]
+  "peer_ids": ["uuid", "uuid"],
+  "peers": [
+    { "client_id": "uuid", "user_id": "uuid", "display_name": "Ana", "avatar_url": "/avatars/v1/...", "can_write": true }
+  ]
 }
 ```
 
 ### Collab and file sync interaction
 
-The two layers are complementary, not mutually exclusive. A file can be in an active collab session and also have its snapshot synced to other devices via Layer 1. The key rules are:
+The collab room carries live edits; file sync (Layer 1) stays the durable, encrypted store. While a
+room is live for a path, file sync for that path follows a leader/follower model:
 
-- During an active collab session (`collab_active`), suppress the 5-second debounce upload for that file — changes are flowing through the collab channel.
-- On `collab_inactive`, re-enable normal file sync behavior and schedule an immediate snapshot upload.
-- The server does **not** run compaction itself — the client is responsible for sending `compact` before disconnecting. If a client crashes without sending `compact`, the next client to connect will receive the incremental updates buffered in the database and must compact them itself before or after the session.
+- One writer in the room is elected the **leader** (for example the connected writer with the lowest
+  Yjs client id in awareness). Only the leader uploads and downloads that file.
+- **Followers** never upload the path. When a remote version arrives they adopt it as their sync
+  base without writing the file, because the content already reached them through the room.
+- Edits made outside the room (another device without collab) arrive through the leader: it
+  downloads the file and applies the difference to the shared document, which propagates to all.
+- When a client leaves the room it stops being a follower and settles normally: it uploads its local
+  file when it differs from the server, otherwise it just adopts the server version.
+- Deleting a file deletes its collab document (compacted state and update log) in the same
+  transaction. Renaming moves it with the file.
 
 ---
 
@@ -360,7 +458,7 @@ For large vaults, use `GET /sync/v1/vaults/{vaultID}/files/list` to get the full
 GET /sync/v1/vaults/{vaultID}/events
 Authorization: Bearer <token>
 X-Device-ID: <uuid>
-Last-Event-ID: <last_sync_event_id from local cursor>
+Last-Event-ID: <last_event_id from the local cursor>
 ```
 
 `Last-Event-ID` triggers server-side replay: all events missed since that ID are sent before live streaming begins.
@@ -371,7 +469,7 @@ On disconnect, reconnect with exponential backoff: 1s, 2s, 4s, 8s, cap at 60s. A
 
 If SSE fails repeatedly (e.g., 5 attempts), fall back to polling:
 ```
-GET /sync/v1/vaults/{vaultID}/changes?since=<last_sync_event_id>&limit=100
+GET /sync/v1/vaults/{vaultID}/changes?since=<last_event_id>&limit=100
 ```
 Repeat every 30 seconds. Return to SSE when the connection is re-established.
 
@@ -389,6 +487,10 @@ SSE events include `device_id`. Ignore events where `device_id == local_device_i
 | `file_renamed` | A file was moved/renamed |
 | `collab_active` | First peer joined a collab room for a file |
 | `collab_inactive` | Last peer left a collab room for a file |
+| `member_joined` / `member_role_changed` / `member_removed` | Membership changed |
+| `key_granted` | A member received a sealed vault key |
+| `member_key_changed` | A member's identity key changed; their vault key must be granted again |
+| `access_changed` | Groups, path access, roles or membership changed; refetch the overview and resync |
 | `ping` | Keepalive every 30s (no action needed) |
 
 ---

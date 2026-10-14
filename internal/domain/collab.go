@@ -22,3 +22,13 @@ type CollabDocument struct {
 	UpdateCount    int
 	UpdatedAt      time.Time
 }
+
+type CollabPresence struct {
+	ClientID   string
+	VaultID    uuid.UUID
+	FilePath   string
+	UserID     uuid.UUID
+	CanWrite   bool
+	JoinedAt   time.Time
+	LastSeenAt time.Time
+}

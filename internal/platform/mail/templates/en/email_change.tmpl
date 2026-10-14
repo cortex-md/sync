@@ -1,0 +1,13 @@
+{{define "subject"}}Confirm your new Cortex email{{end}}
+{{define "text"}}Hi {{.DisplayName}},
+
+Confirm {{.NewEmail}} as the new email of your Cortex account:
+
+{{.Link}}
+
+The link expires in 24 hours. Your current email stays active until you confirm.{{end}}
+{{define "preheader"}}Confirm {{.NewEmail}} as your new Cortex email.{{end}}
+{{define "heading"}}Confirm your new email{{end}}
+{{define "body"}}<p style="margin:0">Hi {{.DisplayName}}, confirm <strong>{{.NewEmail}}</strong> as the new email of your Cortex account. The link expires in 24 hours.</p>{{end}}
+{{define "cta"}}Confirm new email{{end}}
+{{define "note"}}Your current email stays active until you confirm.{{end}}

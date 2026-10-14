@@ -1,0 +1,39 @@
+{{define "html"}}<!doctype html>
+<html lang="{{.Locale}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>{{template "subject" .}}</title>
+<style>
+@media (prefers-color-scheme: dark) {
+.cx-page{background:#141210 !important}
+.cx-card{background:#1e1e1e !important;border-color:#373737 !important}
+.cx-cell{background:#282828 !important}
+.cx-text{color:#f3f3f3 !important}
+.cx-secondary{color:#dcdcdc !important}
+.cx-muted{color:#b8b8b8 !important}
+.cx-rule{border-color:#373737 !important}
+.cx-cta{color:#101010 !important}
+}
+</style>
+</head>
+<body class="cx-page" style="margin:0;padding:0;background:#f6f5f3;-webkit-text-size-adjust:100%">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent">{{block "preheader" .}}{{end}}</div>
+<table role="presentation" class="cx-page" width="100%" cellspacing="0" cellpadding="0" style="background:#f6f5f3"><tr><td align="center" style="padding:40px 16px">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;border-collapse:separate;border-spacing:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">
+<tr><td style="padding:0 8px 20px"><table role="presentation" cellspacing="0" cellpadding="0" style="border-collapse:collapse"><tr>{{if .PublicURL}}<td style="padding-right:10px"><img src="{{.PublicURL}}/assets/v1/logo.png" alt="" width="28" height="28" style="display:block;border-radius:7px"></td>{{end}}<td class="cx-text" style="color:#1c1917;font-size:16px;font-weight:600">Cortex</td></tr></table></td></tr>
+<tr><td class="cx-card" style="padding:36px 40px;border-radius:16px;background:#ffffff;border:1px solid #e8e5e1">
+<h1 class="cx-text" style="margin:0 0 12px;color:#1c1917;font-size:24px;line-height:1.3;font-weight:600;letter-spacing:-0.01em">{{block "heading" .}}{{end}}</h1>
+<div class="cx-secondary" style="color:#57534e;font-size:15px;line-height:1.6">{{template "body" .}}</div>
+{{block "details" .}}{{end}}
+{{if .Link}}<table role="presentation" cellspacing="0" cellpadding="0" style="margin:22px 0 6px;border-collapse:collapse"><tr><td style="border-radius:999px;background:#fb7185"><a class="cx-cta" href="{{.Link}}" style="display:inline-block;padding:13px 24px;color:#090b10;font-size:15px;font-weight:600;text-decoration:none">{{block "cta" .}}{{end}}</a></td></tr></table>
+<p class="cx-muted" style="margin:14px 0 0;color:#8a847d;font-size:12px;line-height:1.6">{{if eq .Locale "pt-BR"}}Ou cole este link no navegador:{{else}}Or paste this link into your browser:{{end}} <span class="cx-secondary" style="color:#57534e;word-break:break-all">{{.Link}}</span></p>{{end}}
+<p class="cx-muted cx-rule" style="margin:22px 0 0;padding-top:18px;border-top:1px solid #e8e5e1;color:#8a847d;font-size:13px;line-height:1.6">{{block "note" .}}{{end}}</p>
+</td></tr>
+<tr><td class="cx-muted" style="padding:22px 8px 0;color:#8a847d;font-size:12px;line-height:1.7">{{block "why" .}}{{if eq .Locale "pt-BR"}}Você recebeu este e-mail por causa de uma atividade na sua conta do Cortex.{{else}}You received this email because of activity on your Cortex account.{{end}}{{end}}</td></tr>
+</table>
+</td></tr></table>
+</body>
+</html>{{end}}

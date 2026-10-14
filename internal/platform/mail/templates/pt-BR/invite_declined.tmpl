@@ -1,0 +1,10 @@
+{{define "subject"}}{{.InviteeEmail}} recusou seu convite para "{{.VaultName}}"{{end}}
+{{define "text"}}Olá {{.DisplayName}},
+
+{{.InviteeEmail}} recusou seu convite para o vault "{{.VaultName}}".
+
+Você pode enviar um novo convite quando quiser pelos membros do vault no Cortex.{{end}}
+{{define "preheader"}}{{.InviteeEmail}} não vai entrar em "{{.VaultName}}" por enquanto.{{end}}
+{{define "heading"}}Seu convite foi recusado{{end}}
+{{define "body"}}<p style="margin:0">Olá {{.DisplayName}}, <strong>{{.InviteeEmail}}</strong> recusou seu convite para o vault <strong>{{.VaultName}}</strong>.</p>{{end}}
+{{define "note"}}Você pode enviar um novo convite quando quiser pelos membros do vault no Cortex.{{end}}

@@ -22,7 +22,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: go test ./... -race -count=1
-      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 
   e2e:
     runs-on: ubuntu-latest

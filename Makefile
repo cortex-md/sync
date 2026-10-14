@@ -22,7 +22,7 @@ test-unit:
 	go test ./internal/... -race -count=1
 
 test-e2e:
-	docker compose --profile replicas up -d --wait postgres s3 mailpit
+	docker compose --profile replicas up -d --wait postgres s3 mailpit || (docker compose logs s3; exit 1)
 	./test/e2e/run.sh
 
 sqlc:

@@ -344,7 +344,7 @@ func TestFileHandler_DeleteFile_Success(t *testing.T) {
 
 	headers := fileAuthHeaders(accessToken, deviceID)
 	rec := doRawRequest(h, "DELETE", "/sync/v1/vaults/"+vaultID+"/files?path=notes/hello.md", nil, headers)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 
 	rec = doRawRequest(h, "GET", "/sync/v1/vaults/"+vaultID+"/files/info?path=notes/hello.md", nil, headers)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -382,7 +382,7 @@ func TestFileHandler_DeleteFile_AlreadyDeleted(t *testing.T) {
 
 	headers := fileAuthHeaders(accessToken, deviceID)
 	rec := doRawRequest(h, "DELETE", "/sync/v1/vaults/"+vaultID+"/files?path=notes/hello.md", nil, headers)
-	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusNoContent, rec.Code)
 
 	rec = doRawRequest(h, "DELETE", "/sync/v1/vaults/"+vaultID+"/files?path=notes/hello.md", nil, headers)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
@@ -397,7 +397,7 @@ func TestFileHandler_RestoreFile_Success(t *testing.T) {
 
 	headers := fileAuthHeaders(accessToken, deviceID)
 	rec := doRawRequest(h, "DELETE", "/sync/v1/vaults/"+vaultID+"/files?path=notes/hello.md", nil, headers)
-	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusNoContent, rec.Code)
 
 	rec = doRawRequest(h, "POST", "/sync/v1/vaults/"+vaultID+"/files/restore?path=notes/hello.md", nil, headers)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

@@ -64,7 +64,7 @@ type VaultInviteRepository interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*domain.VaultInvite, error)
 	GetByTokenHash(ctx context.Context, tokenHash string) (*domain.VaultInvite, error)
 	RotateToken(ctx context.Context, id uuid.UUID, tokenHash string) error
-	ListByVaultID(ctx context.Context, vaultID uuid.UUID) ([]domain.VaultInvite, error)
+	ListPendingByVault(ctx context.Context, vaultID uuid.UUID) ([]domain.VaultInvite, error)
 	ListPendingForEmail(ctx context.Context, email string) ([]domain.InviteDetails, error)
 	PendingExists(ctx context.Context, vaultID uuid.UUID, email string) (bool, error)
 	Accept(ctx context.Context, id uuid.UUID) error

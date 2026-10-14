@@ -174,13 +174,16 @@ func (q *Queries) GetTemplateShareForUpdate(ctx context.Context, id uuid.UUID) (
 }
 
 const listMarketTemplateShares = `-- name: ListMarketTemplateShares :many
-SELECT id, vault_id, owner_id, kind, audience, group_id, name, description, include_samples,
-    encrypted, file_count, version, status, slug, review_note, created_at, updated_at
-FROM template_shares
-WHERE audience = 'market' AND status = 'published'
-  AND ($1::text IS NULL OR kind = $1::text)
-  AND ($2::text IS NULL OR name ILIKE $2::text OR description ILIKE $2::text)
-ORDER BY updated_at DESC, id
+SELECT t.id, t.vault_id, t.owner_id, t.kind, t.audience, t.group_id, t.name, t.description,
+    t.include_samples, t.encrypted, t.file_count, t.version, t.status, t.slug, t.review_note,
+    t.created_at, t.updated_at, coalesce(u.display_name, '')::text AS owner_name
+FROM template_shares t
+JOIN vaults v ON v.id = t.vault_id AND v.allow_public_links
+LEFT JOIN users u ON u.id = t.owner_id
+WHERE t.audience = 'market' AND t.status = 'published'
+  AND ($1::text IS NULL OR t.kind = $1::text)
+  AND ($2::text IS NULL OR t.name ILIKE $2::text OR t.description ILIKE $2::text)
+ORDER BY t.updated_at DESC, t.id
 LIMIT $3
 `
 
@@ -208,6 +211,7 @@ type ListMarketTemplateSharesRow struct {
 	ReviewNote     string
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+	OwnerName      string
 }
 
 func (q *Queries) ListMarketTemplateShares(ctx context.Context, arg ListMarketTemplateSharesParams) ([]ListMarketTemplateSharesRow, error) {
@@ -237,6 +241,7 @@ func (q *Queries) ListMarketTemplateShares(ctx context.Context, arg ListMarketTe
 			&i.ReviewNote,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.OwnerName,
 		); err != nil {
 			return nil, err
 		}
@@ -296,11 +301,13 @@ func (q *Queries) ListPendingTemplateShares(ctx context.Context, rowLimit int32)
 }
 
 const listTemplateSharesByVault = `-- name: ListTemplateSharesByVault :many
-SELECT id, vault_id, owner_id, kind, audience, group_id, name, description, include_samples,
-    encrypted, file_count, version, status, slug, review_note, created_at, updated_at
-FROM template_shares
-WHERE vault_id = $1
-ORDER BY updated_at DESC, id
+SELECT t.id, t.vault_id, t.owner_id, t.kind, t.audience, t.group_id, t.name, t.description,
+    t.include_samples, t.encrypted, t.file_count, t.version, t.status, t.slug, t.review_note,
+    t.created_at, t.updated_at, coalesce(u.display_name, '')::text AS owner_name
+FROM template_shares t
+LEFT JOIN users u ON u.id = t.owner_id
+WHERE t.vault_id = $1
+ORDER BY t.updated_at DESC, t.id
 `
 
 type ListTemplateSharesByVaultRow struct {
@@ -321,6 +328,7 @@ type ListTemplateSharesByVaultRow struct {
 	ReviewNote     string
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+	OwnerName      string
 }
 
 func (q *Queries) ListTemplateSharesByVault(ctx context.Context, vaultID uuid.UUID) ([]ListTemplateSharesByVaultRow, error) {
@@ -350,6 +358,7 @@ func (q *Queries) ListTemplateSharesByVault(ctx context.Context, vaultID uuid.UU
 			&i.ReviewNote,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.OwnerName,
 		); err != nil {
 			return nil, err
 		}

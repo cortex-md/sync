@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strconv"
 	"time"
 
 	"github.com/cortexnotes/cortex-sync/internal/domain"
@@ -19,6 +20,7 @@ const (
 	BatchMaxBytes     int64 = 64 << 20
 	maxListPageSize         = 5000
 	maxHistoryEntries       = 200
+	maxDeltasPageSize       = 200
 )
 
 type Service struct {
@@ -627,19 +629,28 @@ func (uc *Service) PlanBatchDownload(ctx context.Context, userID, vaultID uuid.U
 }
 
 type DownloadDeltasResult struct {
-	Deltas []domain.FileDelta
+	Deltas     []domain.FileDelta
+	NextCursor string
 }
 
-func (uc *Service) DownloadDeltas(ctx context.Context, userID uuid.UUID, vaultID uuid.UUID, filePath string, sinceVersion int) (*DownloadDeltasResult, error) {
+func (uc *Service) DownloadDeltas(ctx context.Context, userID uuid.UUID, vaultID uuid.UUID, filePath string, sinceVersion, limit int) (*DownloadDeltasResult, error) {
 	if _, err := uc.authz.RequirePath(ctx, vaultID, userID, filePath, domain.PermFileRead); err != nil {
 		return nil, err
 	}
 
-	deltas, err := uc.deltas.ListByFilePath(ctx, vaultID, filePath, sinceVersion)
+	if limit <= 0 || limit > maxDeltasPageSize {
+		limit = maxDeltasPageSize
+	}
+	deltas, err := uc.deltas.ListByFilePath(ctx, vaultID, filePath, sinceVersion, limit+1)
 	if err != nil {
 		return nil, err
 	}
-	return &DownloadDeltasResult{Deltas: deltas}, nil
+	result := &DownloadDeltasResult{Deltas: deltas}
+	if len(deltas) > limit {
+		result.Deltas = deltas[:limit]
+		result.NextCursor = strconv.Itoa(result.Deltas[limit-1].BaseVersion + 1)
+	}
+	return result, nil
 }
 
 type DeleteFileInput struct {

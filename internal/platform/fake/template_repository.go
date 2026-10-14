@@ -14,10 +14,19 @@ import (
 type TemplateRepository struct {
 	mu        sync.Mutex
 	templates map[uuid.UUID]*domain.TemplateShare
+	users     *UserRepository
+	vaults    *VaultRepository
 }
 
 func NewTemplateRepository() *TemplateRepository {
 	return &TemplateRepository{templates: make(map[uuid.UUID]*domain.TemplateShare)}
+}
+
+func (r *TemplateRepository) ResolveListingsWith(users *UserRepository, vaults *VaultRepository) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.users = users
+	r.vaults = vaults
 }
 
 func copyTemplate(t *domain.TemplateShare) domain.TemplateShare {
@@ -68,21 +77,42 @@ func (r *TemplateRepository) GetBySlug(_ context.Context, slug string) (*domain.
 	return nil, domain.ErrNotFound
 }
 
-func (r *TemplateRepository) ListByVault(_ context.Context, vaultID uuid.UUID) ([]domain.TemplateShare, error) {
-	return r.list(func(t *domain.TemplateShare) bool { return t.VaultID == vaultID }, 0), nil
+func (r *TemplateRepository) ListByVault(ctx context.Context, vaultID uuid.UUID) ([]domain.TemplateListing, error) {
+	return r.withOwners(ctx, r.list(func(t *domain.TemplateShare) bool { return t.VaultID == vaultID }, 0)), nil
 }
 
-func (r *TemplateRepository) ListMarket(_ context.Context, kind domain.TemplateKind, query string, limit int) ([]domain.TemplateShare, error) {
+func (r *TemplateRepository) ListMarket(ctx context.Context, kind domain.TemplateKind, query string, limit int) ([]domain.TemplateListing, error) {
 	needle := strings.ToLower(query)
-	return r.list(func(t *domain.TemplateShare) bool {
+	return r.withOwners(ctx, r.list(func(t *domain.TemplateShare) bool {
 		if t.Audience != domain.TemplateAudienceMarket || t.Status != domain.TemplateStatusPublished {
 			return false
 		}
 		if kind != "" && t.Kind != kind {
 			return false
 		}
-		return needle == "" || strings.Contains(strings.ToLower(t.Name), needle) || strings.Contains(strings.ToLower(t.Description), needle)
-	}, limit), nil
+		if needle != "" && !strings.Contains(strings.ToLower(t.Name), needle) && !strings.Contains(strings.ToLower(t.Description), needle) {
+			return false
+		}
+		if r.vaults == nil {
+			return true
+		}
+		vault, err := r.vaults.GetByID(ctx, t.VaultID)
+		return err == nil && vault.AllowPublicLinks
+	}, limit)), nil
+}
+
+func (r *TemplateRepository) withOwners(ctx context.Context, templates []domain.TemplateShare) []domain.TemplateListing {
+	listings := make([]domain.TemplateListing, len(templates))
+	for i, t := range templates {
+		listings[i].TemplateShare = t
+		if r.users == nil || t.OwnerID == nil {
+			continue
+		}
+		if user, err := r.users.GetByID(ctx, *t.OwnerID); err == nil {
+			listings[i].OwnerName = user.DisplayName
+		}
+	}
+	return listings
 }
 
 func (r *TemplateRepository) list(match func(*domain.TemplateShare) bool, limit int) []domain.TemplateShare {

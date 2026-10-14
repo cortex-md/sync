@@ -71,7 +71,7 @@ type FileSnapshotRepository interface {
 
 type FileDeltaRepository interface {
 	Create(ctx context.Context, delta *domain.FileDelta) error
-	ListByFilePath(ctx context.Context, vaultID uuid.UUID, filePath string, sinceVersion int) ([]domain.FileDelta, error)
+	ListByFilePath(ctx context.Context, vaultID uuid.UUID, filePath string, sinceVersion, limit int) ([]domain.FileDelta, error)
 	DeleteByFilePath(ctx context.Context, vaultID uuid.UUID, filePath string, beforeVersion int) (int64, error)
 	MovePath(ctx context.Context, vaultID uuid.UUID, oldPath, newPath string) error
 }

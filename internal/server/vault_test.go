@@ -294,7 +294,7 @@ func TestVaultHandler_Delete_Success(t *testing.T) {
 
 	th := &testHarness{router: h.router}
 	rec := doRequestWithHeaders(th, "DELETE", "/vaults/v1/"+vaultID+"/", nil, vaultAuthHeaders(accessToken, deviceID))
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 
 	rec = doRequestWithHeaders(th, "GET", "/vaults/v1/"+vaultID+"/", nil, vaultAuthHeaders(accessToken, deviceID))
 	assert.True(t, rec.Code == http.StatusNotFound || rec.Code == http.StatusForbidden, "expected 404 or 403, got %d", rec.Code)

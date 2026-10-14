@@ -269,7 +269,7 @@ func (uc *InviteService) ListByVault(ctx context.Context, actorID uuid.UUID, vau
 		return nil, err
 	}
 
-	invites, err := uc.invites.ListByVaultID(ctx, vaultID)
+	invites, err := uc.invites.ListPendingByVault(ctx, vaultID)
 	if err != nil {
 		return nil, err
 	}

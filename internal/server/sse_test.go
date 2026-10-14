@@ -506,7 +506,7 @@ func TestSSEHandler_Events_FileDeleteTriggersSSE(t *testing.T) {
 	deleteReq.Header.Set("X-Device-ID", deviceID)
 	deleteRec := httptest.NewRecorder()
 	h.router.ServeHTTP(deleteRec, deleteReq)
-	require.Equal(t, http.StatusOK, deleteRec.Code, deleteRec.Body.String())
+	require.Equal(t, http.StatusNoContent, deleteRec.Code, deleteRec.Body.String())
 
 	scanner := bufio.NewScanner(resp.Body)
 	reader := newSSEReader(scanner)

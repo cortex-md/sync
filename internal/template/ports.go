@@ -16,8 +16,8 @@ type TemplateRepository interface {
 	Get(ctx context.Context, id uuid.UUID) (*domain.TemplateShare, error)
 	GetForUpdate(ctx context.Context, id uuid.UUID) (*domain.TemplateShare, error)
 	GetBySlug(ctx context.Context, slug string) (*domain.TemplateShare, error)
-	ListByVault(ctx context.Context, vaultID uuid.UUID) ([]domain.TemplateShare, error)
-	ListMarket(ctx context.Context, kind domain.TemplateKind, query string, limit int) ([]domain.TemplateShare, error)
+	ListByVault(ctx context.Context, vaultID uuid.UUID) ([]domain.TemplateListing, error)
+	ListMarket(ctx context.Context, kind domain.TemplateKind, query string, limit int) ([]domain.TemplateListing, error)
 	Update(ctx context.Context, template *domain.TemplateShare) error
 	SetReview(ctx context.Context, id uuid.UUID, version int, status domain.TemplateStatus, note string, fileCount int) (bool, error)
 	ListPending(ctx context.Context, limit int) ([]domain.TemplateShare, error)

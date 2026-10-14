@@ -15,20 +15,25 @@ SELECT * FROM template_shares WHERE id = $1;
 SELECT * FROM template_shares WHERE slug = $1;
 
 -- name: ListTemplateSharesByVault :many
-SELECT id, vault_id, owner_id, kind, audience, group_id, name, description, include_samples,
-    encrypted, file_count, version, status, slug, review_note, created_at, updated_at
-FROM template_shares
-WHERE vault_id = $1
-ORDER BY updated_at DESC, id;
+SELECT t.id, t.vault_id, t.owner_id, t.kind, t.audience, t.group_id, t.name, t.description,
+    t.include_samples, t.encrypted, t.file_count, t.version, t.status, t.slug, t.review_note,
+    t.created_at, t.updated_at, coalesce(u.display_name, '')::text AS owner_name
+FROM template_shares t
+LEFT JOIN users u ON u.id = t.owner_id
+WHERE t.vault_id = $1
+ORDER BY t.updated_at DESC, t.id;
 
 -- name: ListMarketTemplateShares :many
-SELECT id, vault_id, owner_id, kind, audience, group_id, name, description, include_samples,
-    encrypted, file_count, version, status, slug, review_note, created_at, updated_at
-FROM template_shares
-WHERE audience = 'market' AND status = 'published'
-  AND (sqlc.narg(kind)::text IS NULL OR kind = sqlc.narg(kind)::text)
-  AND (sqlc.narg(pattern)::text IS NULL OR name ILIKE sqlc.narg(pattern)::text OR description ILIKE sqlc.narg(pattern)::text)
-ORDER BY updated_at DESC, id
+SELECT t.id, t.vault_id, t.owner_id, t.kind, t.audience, t.group_id, t.name, t.description,
+    t.include_samples, t.encrypted, t.file_count, t.version, t.status, t.slug, t.review_note,
+    t.created_at, t.updated_at, coalesce(u.display_name, '')::text AS owner_name
+FROM template_shares t
+JOIN vaults v ON v.id = t.vault_id AND v.allow_public_links
+LEFT JOIN users u ON u.id = t.owner_id
+WHERE t.audience = 'market' AND t.status = 'published'
+  AND (sqlc.narg(kind)::text IS NULL OR t.kind = sqlc.narg(kind)::text)
+  AND (sqlc.narg(pattern)::text IS NULL OR t.name ILIKE sqlc.narg(pattern)::text OR t.description ILIKE sqlc.narg(pattern)::text)
+ORDER BY t.updated_at DESC, t.id
 LIMIT @row_limit;
 
 -- name: UpdateTemplateShare :one

@@ -51,8 +51,10 @@ func newTemplateTestHarness(t *testing.T) *templateTestHarness {
 	groupID := uuid.New()
 	require.NoError(t, members.CreateGroup(ctx, &domain.VaultGroup{ID: groupID, VaultID: vaultID, Name: "Design", MemberIDs: []uuid.UUID{viewerID}}))
 
+	templates := fake.NewTemplateRepository()
+	templates.ResolveListingsWith(users, vaults)
 	service := template.NewService(template.Deps{
-		Templates: fake.NewTemplateRepository(),
+		Templates: templates,
 		Groups:    members,
 		Users:     users,
 		Vaults:    vaults,

@@ -33,6 +33,7 @@ func newTemplateSetup(t *testing.T) *templateSetup {
 	vaults := fake.NewVaultRepository()
 	users := fake.NewUserRepository()
 	templates := fake.NewTemplateRepository()
+	templates.ResolveListingsWith(users, vaults)
 	s := &templateSetup{
 		ctx:       context.Background(),
 		templates: templates,

@@ -405,8 +405,8 @@ func (r *FileDeltaRepository) Create(ctx context.Context, d *domain.FileDelta) e
 	}))
 }
 
-func (r *FileDeltaRepository) ListByFilePath(ctx context.Context, vaultID uuid.UUID, filePath string, sinceVersion int) ([]domain.FileDelta, error) {
-	rows, err := r.q(ctx).ListDeltas(ctx, db.ListDeltasParams{VaultID: vaultID, FilePath: filePath, SinceVersion: int32(sinceVersion)})
+func (r *FileDeltaRepository) ListByFilePath(ctx context.Context, vaultID uuid.UUID, filePath string, sinceVersion, limit int) ([]domain.FileDelta, error) {
+	rows, err := r.q(ctx).ListDeltas(ctx, db.ListDeltasParams{VaultID: vaultID, FilePath: filePath, SinceVersion: int32(sinceVersion), RowLimit: rowLimit(limit)})
 	if err != nil {
 		return nil, mapError(err)
 	}

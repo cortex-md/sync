@@ -249,7 +249,7 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func handleVaultError(w http.ResponseWriter, err error) {

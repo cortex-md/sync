@@ -244,7 +244,16 @@ func (h *Handler) DownloadDeltas(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	result, err := h.files.DownloadDeltas(r.Context(), claims.UserID, vaultID, filePath, sinceVersion)
+	limit := 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit < 0 {
+			httpx.WriteError(w, http.StatusBadRequest, "invalid limit query parameter")
+			return
+		}
+	}
+
+	result, err := h.files.DownloadDeltas(r.Context(), claims.UserID, vaultID, filePath, sinceVersion, limit)
 	if err != nil {
 		handleFileError(w, err)
 		return
@@ -265,6 +274,9 @@ func (h *Handler) DownloadDeltas(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	if result.NextCursor != "" {
+		w.Header().Set("X-Next-Cursor", result.NextCursor)
+	}
 	httpx.WriteJSON(w, http.StatusOK, resp)
 }
 
@@ -311,7 +323,7 @@ func (h *Handler) DeleteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) RestoreFile(w http.ResponseWriter, r *http.Request) {

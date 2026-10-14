@@ -197,7 +197,7 @@ func TestVaultMemberHandler_Remove_Success(t *testing.T) {
 	require.NotEmpty(t, editorUserID)
 
 	rec = doRequestWithHeaders(th, "DELETE", "/vaults/v1/"+vaultID+"/members/"+editorUserID, nil, vaultAuthHeaders(ownerToken, ownerDevice))
-	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 
 	rec = doRequestWithHeaders(th, "GET", "/vaults/v1/"+vaultID+"/members/", nil, vaultAuthHeaders(ownerToken, ownerDevice))
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -234,7 +234,7 @@ func TestVaultMemberHandler_Remove_SelfLeave(t *testing.T) {
 	require.NotEmpty(t, editorUserID)
 
 	rec = doRequestWithHeaders(th, "DELETE", "/vaults/v1/"+vaultID+"/members/"+editorUserID, nil, vaultAuthHeaders(editorToken, editorDevice))
-	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 }
 
 func TestVaultMemberHandler_Remove_OwnerCannotLeave(t *testing.T) {

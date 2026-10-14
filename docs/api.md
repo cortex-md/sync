@@ -451,13 +451,7 @@ All endpoints require authentication.
 
 **URL Params**: `deviceID` (uuid)
 
-**Response** `200`
-
-```json
-{
-  "status": "ok"
-}
-```
+**Response** `204` (no body)
 
 **Errors**
 
@@ -613,13 +607,7 @@ Requires admin or owner. Every field is optional; omitted fields are unchanged.
 
 **URL Params**: `vaultID` (uuid)
 
-**Response** `200`
-
-```json
-{
-  "status": "ok"
-}
-```
+**Response** `204` (no body)
 
 Blobs are queued for asynchronous deletion.
 
@@ -724,13 +712,7 @@ Requires viewer or above (guests cannot list members).
 
 **URL Params**: `vaultID` (uuid), `userID` (uuid)
 
-**Response** `200`
-
-```json
-{
-  "status": "ok"
-}
-```
+**Response** `204` (no body)
 
 **Errors**
 
@@ -890,8 +872,9 @@ rotates the token (see [Idempotent creates](#idempotent-creates)).
 
 ### GET /vaults/v1/{vaultID}/invites/
 
-Requires admin or owner. Returns every invite of the vault (including accepted and expired) without
-`encrypted_vault_key`, `invite_token` or `invite_url`.
+Requires admin or owner. Returns the vault invites that were not accepted yet (expired ones stay until
+the cleaner removes them), oldest first, without `encrypted_vault_key`, `invite_token` or
+`invite_url`.
 
 **URL Params**: `vaultID` (uuid)
 
@@ -901,13 +884,7 @@ Requires admin or owner. Returns every invite of the vault (including accepted a
 
 **URL Params**: `vaultID` (uuid), `inviteID` (uuid)
 
-**Response** `200`
-
-```json
-{
-  "status": "ok"
-}
-```
+**Response** `204` (no body)
 
 ### GET /vaults/v1/invites
 
@@ -1191,13 +1168,7 @@ Frame header:
 |-------|----------|
 | path | Yes |
 
-**Response** `200`
-
-```json
-{
-  "status": "ok"
-}
-```
+**Response** `204` (no body)
 
 **Errors**
 
@@ -1262,9 +1233,11 @@ Download deltas since a version.
 | Param | Required | Description |
 |-------|----------|-------------|
 | path | Yes | File path |
-| since_version | No | Return deltas after this version (default: 0) |
+| since_version | No | Return deltas whose `base_version` is at least this value (default: 0) |
+| limit | No | Page size; `0` or omitted uses 200, values above 200 are capped |
 
-**Response** `200`
+**Response** `200`, ordered by `base_version`. When more deltas remain, the `X-Next-Cursor` header
+carries the `since_version` for the next page.
 
 ```json
 [

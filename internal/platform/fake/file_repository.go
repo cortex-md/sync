@@ -241,7 +241,7 @@ func (r *FileDeltaRepository) Create(_ context.Context, delta *domain.FileDelta)
 	return nil
 }
 
-func (r *FileDeltaRepository) ListByFilePath(_ context.Context, vaultID uuid.UUID, filePath string, sinceVersion int) ([]domain.FileDelta, error) {
+func (r *FileDeltaRepository) ListByFilePath(_ context.Context, vaultID uuid.UUID, filePath string, sinceVersion, limit int) ([]domain.FileDelta, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var result []domain.FileDelta
@@ -251,6 +251,9 @@ func (r *FileDeltaRepository) ListByFilePath(_ context.Context, vaultID uuid.UUI
 		}
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].BaseVersion < result[j].BaseVersion })
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
 	return result, nil
 }
 

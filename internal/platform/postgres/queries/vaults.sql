@@ -79,7 +79,7 @@ UPDATE vault_invites SET token_hash = @token_hash WHERE id = @id AND accepted = 
 SELECT * FROM vault_invites WHERE vault_id = $1 ORDER BY created_at;
 
 -- name: ListPendingInvitesByVault :many
-SELECT * FROM vault_invites WHERE vault_id = $1 AND accepted = false AND expires_at > now() ORDER BY created_at;
+SELECT * FROM vault_invites WHERE vault_id = $1 AND accepted = false ORDER BY created_at;
 
 -- name: PendingInviteExists :one
 SELECT EXISTS (

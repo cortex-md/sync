@@ -166,7 +166,7 @@ func TestDeviceHandler_Revoke(t *testing.T) {
 	loginWithDevice(t, h, "test@example.com", "password123", secondDeviceID, "Second Device")
 
 	rec := doRequestWithHeaders(&testHarness{router: h.router}, "DELETE", "/devices/v1/"+secondDeviceID, nil, authHeaders(accessToken, deviceID))
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 
 	rec = doRequestWithHeaders(&testHarness{router: h.router}, "GET", "/devices/v1/"+secondDeviceID, nil, authHeaders(accessToken, deviceID))
 	require.Equal(t, http.StatusOK, rec.Code)

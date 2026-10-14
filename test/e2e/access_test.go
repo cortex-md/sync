@@ -151,7 +151,7 @@ func TestGroupsAndPathAccess(t *testing.T) {
 
 	ownerSSE := openSSE(alice, urlB, vaultID)
 	status, _, _ = alice.do("DELETE", "/vaults/v1/"+vaultID+"/members/"+carol.userID, nil)
-	check("owner removes viewer", status == 200, status)
+	check("owner removes viewer", status == 204, status)
 	check("member removal publishes access_changed", ownerSSE.waitFor("access_changed", 5*time.Second) != nil)
 	_, body, _ = alice.do("GET", "/vaults/v1/"+vaultID+"/access", nil)
 	check("removing a member drops their entries", !strings.Contains(string(body), carol.userID) && !strings.Contains(string(body), `"path":"team/"`), string(body))

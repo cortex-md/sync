@@ -46,6 +46,8 @@ func FakeRepositories() Repositories {
 	snapshots.ResolveAuthorsWith(users, devices)
 	latest := fake.NewFileLatestRepository()
 	members.ResolveFilesWith(latest)
+	templates := fake.NewTemplateRepository()
+	templates.ResolveListingsWith(users, vaults)
 
 	return Repositories{
 		Users:         users,
@@ -67,7 +69,7 @@ func FakeRepositories() Repositories {
 		Subscriptions: fake.NewSubscriptionRepository(),
 		Outbox:        fake.NewEmailOutboxRepository(),
 		Shares:        fake.NewShareRepository(),
-		Templates:     fake.NewTemplateRepository(),
+		Templates:     templates,
 		Blobs:         fake.NewBlobStorage(),
 		BlobQueue:     fake.NewBlobQueue(),
 		Tx:            fake.NewTransactor(),

@@ -453,7 +453,7 @@ func TestFileUsecase_DownloadDeltas_Success(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	result, err := deps.uc.DownloadDeltas(context.Background(), userID, vaultID, "notes/hello.md", 1)
+	result, err := deps.uc.DownloadDeltas(context.Background(), userID, vaultID, "notes/hello.md", 1, 0)
 	require.NoError(t, err)
 	assert.Len(t, result.Deltas, 1)
 	assert.Equal(t, 1, result.Deltas[0].BaseVersion)
@@ -465,7 +465,7 @@ func TestFileUsecase_DownloadDeltas_NotMember(t *testing.T) {
 	vaultID := uuid.New()
 	userID := uuid.New()
 
-	_, err := deps.uc.DownloadDeltas(context.Background(), userID, vaultID, "test.md", 0)
+	_, err := deps.uc.DownloadDeltas(context.Background(), userID, vaultID, "test.md", 0, 0)
 	assert.Equal(t, domain.ErrVaultAccessDenied, err)
 }
 
@@ -1107,13 +1107,13 @@ func TestFileUsecase_SnapshotCleansUpOldDeltas(t *testing.T) {
 	uploadTestDelta(t, deps, userID, deviceID, vaultID, "notes/test.md", 2, []byte("delta-2"))
 	uploadTestDelta(t, deps, userID, deviceID, vaultID, "notes/test.md", 3, []byte("delta-3"))
 
-	deltasBeforeSnapshot, err := deps.deltas.ListByFilePath(context.Background(), vaultID, "notes/test.md", 0)
+	deltasBeforeSnapshot, err := deps.deltas.ListByFilePath(context.Background(), vaultID, "notes/test.md", 0, 0)
 	require.NoError(t, err)
 	assert.Len(t, deltasBeforeSnapshot, 3)
 
 	uploadTestSnapshot(t, deps, userID, deviceID, vaultID, "notes/test.md", []byte("v5-snapshot"))
 
-	deltasAfterSnapshot, err := deps.deltas.ListByFilePath(context.Background(), vaultID, "notes/test.md", 0)
+	deltasAfterSnapshot, err := deps.deltas.ListByFilePath(context.Background(), vaultID, "notes/test.md", 0, 0)
 	require.NoError(t, err)
 	assert.Len(t, deltasAfterSnapshot, 0)
 }
@@ -1133,11 +1133,11 @@ func TestFileUsecase_SnapshotCleansUpOnlyOldDeltas(t *testing.T) {
 
 	uploadTestSnapshot(t, deps, userID, deviceID, vaultID, "notes/a.md", []byte("a-v3"))
 
-	deltasA, err := deps.deltas.ListByFilePath(context.Background(), vaultID, "notes/a.md", 0)
+	deltasA, err := deps.deltas.ListByFilePath(context.Background(), vaultID, "notes/a.md", 0, 0)
 	require.NoError(t, err)
 	assert.Len(t, deltasA, 0)
 
-	deltasB, err := deps.deltas.ListByFilePath(context.Background(), vaultID, "notes/b.md", 0)
+	deltasB, err := deps.deltas.ListByFilePath(context.Background(), vaultID, "notes/b.md", 0, 0)
 	require.NoError(t, err)
 	assert.Len(t, deltasB, 1)
 }

@@ -519,7 +519,7 @@ func (r *VaultInviteRepository) ListPendingByVault(_ context.Context, vaultID uu
 	defer r.mu.RUnlock()
 	var result []domain.VaultInvite
 	for _, inv := range r.invites {
-		if inv.VaultID == vaultID && !inv.Accepted && time.Now().Before(inv.ExpiresAt) {
+		if inv.VaultID == vaultID && !inv.Accepted {
 			result = append(result, *inv)
 		}
 	}

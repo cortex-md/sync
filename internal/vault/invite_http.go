@@ -279,7 +279,7 @@ func (h *InviteHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *InviteHandler) InvitePage(w http.ResponseWriter, r *http.Request) {

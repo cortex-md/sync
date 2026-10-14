@@ -476,16 +476,23 @@ const listDeltas = `-- name: ListDeltas :many
 SELECT id, vault_id, file_path, base_version, target_version, encrypted_delta, size_bytes, created_by, device_id, created_at FROM file_deltas
 WHERE vault_id = $1 AND file_path = $2 AND base_version >= $3
 ORDER BY base_version
+LIMIT $4
 `
 
 type ListDeltasParams struct {
 	VaultID      uuid.UUID
 	FilePath     string
 	SinceVersion int32
+	RowLimit     int32
 }
 
 func (q *Queries) ListDeltas(ctx context.Context, arg ListDeltasParams) ([]FileDelta, error) {
-	rows, err := q.db.Query(ctx, listDeltas, arg.VaultID, arg.FilePath, arg.SinceVersion)
+	rows, err := q.db.Query(ctx, listDeltas,
+		arg.VaultID,
+		arg.FilePath,
+		arg.SinceVersion,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}

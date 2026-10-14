@@ -39,8 +39,8 @@ func toTemplate(t db.TemplateShare) domain.TemplateShare {
 	}
 }
 
-func toTemplateSummary(t db.ListTemplateSharesByVaultRow) domain.TemplateShare {
-	return domain.TemplateShare{
+func toTemplateListing(t db.ListTemplateSharesByVaultRow) domain.TemplateListing {
+	return domain.TemplateListing{TemplateShare: domain.TemplateShare{
 		ID:             t.ID,
 		VaultID:        t.VaultID,
 		OwnerID:        t.OwnerID,
@@ -58,7 +58,7 @@ func toTemplateSummary(t db.ListTemplateSharesByVaultRow) domain.TemplateShare {
 		ReviewNote:     t.ReviewNote,
 		CreatedAt:      t.CreatedAt,
 		UpdatedAt:      t.UpdatedAt,
-	}
+	}, OwnerName: t.OwnerName}
 }
 
 func (r *TemplateRepository) Create(ctx context.Context, t *domain.TemplateShare) error {
@@ -114,21 +114,21 @@ func (r *TemplateRepository) GetBySlug(ctx context.Context, slug string) (*domai
 	return &t, nil
 }
 
-func (r *TemplateRepository) ListByVault(ctx context.Context, vaultID uuid.UUID) ([]domain.TemplateShare, error) {
+func (r *TemplateRepository) ListByVault(ctx context.Context, vaultID uuid.UUID) ([]domain.TemplateListing, error) {
 	rows, err := r.q(ctx).ListTemplateSharesByVault(ctx, vaultID)
 	if err != nil {
 		return nil, mapError(err)
 	}
-	templates := make([]domain.TemplateShare, len(rows))
+	templates := make([]domain.TemplateListing, len(rows))
 	for i, row := range rows {
-		templates[i] = toTemplateSummary(row)
+		templates[i] = toTemplateListing(row)
 	}
 	return templates, nil
 }
 
 var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 
-func (r *TemplateRepository) ListMarket(ctx context.Context, kind domain.TemplateKind, query string, limit int) ([]domain.TemplateShare, error) {
+func (r *TemplateRepository) ListMarket(ctx context.Context, kind domain.TemplateKind, query string, limit int) ([]domain.TemplateListing, error) {
 	params := db.ListMarketTemplateSharesParams{RowLimit: int32(limit)}
 	if kind != "" {
 		value := string(kind)
@@ -142,9 +142,9 @@ func (r *TemplateRepository) ListMarket(ctx context.Context, kind domain.Templat
 	if err != nil {
 		return nil, mapError(err)
 	}
-	templates := make([]domain.TemplateShare, len(rows))
+	templates := make([]domain.TemplateListing, len(rows))
 	for i, row := range rows {
-		templates[i] = toTemplateSummary(db.ListTemplateSharesByVaultRow(row))
+		templates[i] = toTemplateListing(db.ListTemplateSharesByVaultRow(row))
 	}
 	return templates, nil
 }

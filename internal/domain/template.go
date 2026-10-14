@@ -62,6 +62,11 @@ type TemplateShare struct {
 	UpdatedAt      time.Time
 }
 
+type TemplateListing struct {
+	TemplateShare
+	OwnerName string
+}
+
 func (t *TemplateShare) OwnedBy(userID uuid.UUID) bool {
 	return t.OwnerID != nil && *t.OwnerID == userID
 }

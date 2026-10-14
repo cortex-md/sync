@@ -352,7 +352,7 @@ func TestVaultInviteHandler_Delete_Success(t *testing.T) {
 	inviteID := invite["id"].(string)
 
 	rec = doRequestWithHeaders(th, "DELETE", "/vaults/v1/"+vaultID+"/invites/"+inviteID, nil, vaultAuthHeaders(ownerToken, ownerDevice))
-	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 
 	rec = doRequestWithHeaders(th, "GET", "/vaults/v1/"+vaultID+"/invites/", nil, vaultAuthHeaders(ownerToken, ownerDevice))
 	require.Equal(t, http.StatusOK, rec.Code)

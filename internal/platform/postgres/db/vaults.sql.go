@@ -494,7 +494,7 @@ func (q *Queries) ListMembershipsByUser(ctx context.Context, userID uuid.UUID) (
 }
 
 const listPendingInvitesByVault = `-- name: ListPendingInvitesByVault :many
-SELECT id, vault_id, inviter_id, invitee_email, role, encrypted_vault_key, accepted, expires_at, created_at, token_hash, grants FROM vault_invites WHERE vault_id = $1 AND accepted = false AND expires_at > now() ORDER BY created_at
+SELECT id, vault_id, inviter_id, invitee_email, role, encrypted_vault_key, accepted, expires_at, created_at, token_hash, grants FROM vault_invites WHERE vault_id = $1 AND accepted = false ORDER BY created_at
 `
 
 func (q *Queries) ListPendingInvitesByVault(ctx context.Context, vaultID uuid.UUID) ([]VaultInvite, error) {

@@ -236,7 +236,7 @@ func TestMultiInstance(t *testing.T) {
 
 	time.Sleep(1500 * time.Millisecond)
 	status, _, _ = alice.do("DELETE", "/vaults/v1/"+vaultID+"/members/"+carol.userID, nil)
-	check("owner removes admin", status == 200, status)
+	check("owner removes admin", status == 204, status)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	_, _, readErr := carolWS.Read(ctx)
 	cancel()
@@ -266,7 +266,7 @@ func TestMultiInstance(t *testing.T) {
 	status, _, _ = alice.upload(A, vaultID, file, []byte("note"))
 	check("upload collab note", status == 200 || status == 201, status)
 	status, _, _ = alice.doOn(A, "DELETE", "/sync/v1/vaults/"+vaultID+"/files?path="+url.QueryEscape(file), nil, nil)
-	check("delete collab note", status == 200 || status == 204, status)
+	check("delete collab note", status == 204, status)
 	afterDelete, _ := dialCollab(alice, A, A, vaultID, file, "")
 	backlog := readTypesUntil(afterDelete, "synced", 3*time.Second)
 	afterDelete.Close(websocket.StatusNormalClosure, "")

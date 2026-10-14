@@ -116,7 +116,8 @@ VALUES (@id, @vault_id, @file_path, @base_version, @target_version, @encrypted_d
 -- name: ListDeltas :many
 SELECT * FROM file_deltas
 WHERE vault_id = @vault_id AND file_path = @file_path AND base_version >= @since_version
-ORDER BY base_version;
+ORDER BY base_version
+LIMIT @row_limit;
 
 -- name: DeleteDeltasBefore :execrows
 DELETE FROM file_deltas WHERE vault_id = @vault_id AND file_path = @file_path AND target_version < @before_version;

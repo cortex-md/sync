@@ -128,11 +128,10 @@ func (s *Service) List(ctx context.Context, userID, vaultID uuid.UUID) ([]View, 
 	if err != nil {
 		return nil, err
 	}
-	names := newNameCache(s.users)
 	views := make([]View, 0, len(templates))
 	for i := range templates {
-		if c.canSee(&templates[i]) {
-			views = append(views, s.view(ctx, names, c.groups, templates[i]))
+		if c.canSee(&templates[i].TemplateShare) {
+			views = append(views, listingView(c.groups, templates[i]))
 		}
 	}
 	return views, nil
@@ -190,7 +189,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (*View, error) 
 		return nil, err
 	}
 	s.reviewIfPending(ctx, t)
-	view := s.view(ctx, newNameCache(s.users), c.groups, *t)
+	view := s.view(ctx, c.groups, *t)
 	return &view, nil
 }
 
@@ -286,7 +285,7 @@ func (s *Service) Update(ctx context.Context, input UpdateInput) (*View, error) 
 		return nil, err
 	}
 	s.reviewIfPending(ctx, updated)
-	view := s.view(ctx, newNameCache(s.users), c.groups, *updated)
+	view := s.view(ctx, c.groups, *updated)
 	return &view, nil
 }
 
@@ -380,18 +379,9 @@ func (s *Service) Market(ctx context.Context, kind domain.TemplateKind, query st
 	if err != nil {
 		return nil, err
 	}
-	names := newNameCache(s.users)
-	allowed := make(map[uuid.UUID]bool)
-	views := make([]PublicView, 0, len(templates))
-	for _, t := range templates {
-		ok, seen := allowed[t.VaultID]
-		if !seen {
-			ok = s.publicLinksAllowed(ctx, t.VaultID)
-			allowed[t.VaultID] = ok
-		}
-		if ok {
-			views = append(views, PublicView{TemplateShare: t, OwnerName: names.name(ctx, t.OwnerID)})
-		}
+	views := make([]PublicView, len(templates))
+	for i, t := range templates {
+		views[i] = PublicView{TemplateShare: t.TemplateShare, OwnerName: t.OwnerName}
 	}
 	return views, nil
 }
@@ -407,7 +397,7 @@ func (s *Service) Resolve(ctx context.Context, slug string) (*PublicView, error)
 	if !t.PubliclyAvailable() || !s.publicLinksAllowed(ctx, t.VaultID) {
 		return nil, domain.ErrNotFound
 	}
-	return &PublicView{TemplateShare: *t, OwnerName: newNameCache(s.users).name(ctx, t.OwnerID)}, nil
+	return &PublicView{TemplateShare: *t, OwnerName: s.ownerName(ctx, t.OwnerID)}, nil
 }
 
 func (s *Service) ReviewPending(ctx context.Context) (int64, error) {
@@ -513,8 +503,12 @@ func (s *Service) vaultTemplate(ctx context.Context, vaultID, templateID uuid.UU
 	return t, nil
 }
 
-func (s *Service) view(ctx context.Context, names *nameCache, groups map[uuid.UUID]string, t domain.TemplateShare) View {
-	view := View{TemplateShare: t, OwnerName: names.name(ctx, t.OwnerID)}
+func (s *Service) view(ctx context.Context, groups map[uuid.UUID]string, t domain.TemplateShare) View {
+	return listingView(groups, domain.TemplateListing{TemplateShare: t, OwnerName: s.ownerName(ctx, t.OwnerID)})
+}
+
+func listingView(groups map[uuid.UUID]string, t domain.TemplateListing) View {
+	view := View{TemplateShare: t.TemplateShare, OwnerName: t.OwnerName}
 	if t.GroupID != nil {
 		if name, ok := groups[*t.GroupID]; ok {
 			view.GroupName = &name
@@ -575,27 +569,13 @@ func sameGroup(a, b *uuid.UUID) bool {
 	return *a == *b
 }
 
-type nameCache struct {
-	users UserLookup
-	names map[uuid.UUID]string
-}
-
-func newNameCache(users UserLookup) *nameCache {
-	return &nameCache{users: users, names: make(map[uuid.UUID]string)}
-}
-
-func (n *nameCache) name(ctx context.Context, id *uuid.UUID) string {
+func (s *Service) ownerName(ctx context.Context, id *uuid.UUID) string {
 	if id == nil {
 		return ""
 	}
-	if name, ok := n.names[*id]; ok {
-		return name
+	user, err := s.users.GetByID(ctx, *id)
+	if err != nil {
+		return ""
 	}
-	user, err := n.users.GetByID(ctx, *id)
-	name := ""
-	if err == nil {
-		name = user.DisplayName
-	}
-	n.names[*id] = name
-	return name
+	return user.DisplayName
 }

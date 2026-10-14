@@ -1,0 +1,96 @@
+name: cortex-sync
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+x-sync: &sync
+  image: ghcr.io/cortex-md/sync:${CORTEX_SYNC_VERSION:?set CORTEX_SYNC_VERSION}
+  env_file: .env
+  environment:
+    CORTEX_SERVER_ENV: production
+    CORTEX_SERVER_TRUST_PROXY_HEADERS: "true"
+    CORTEX_SERVER_PUBLIC_URL: https://${CORTEX_SYNC_DOMAIN}
+    CORTEX_SERVER_DRAIN_DELAY: 5s
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+  restart: unless-stopped
+  mem_limit: 256m
+  logging: *logging
+  healthcheck:
+    test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/ready"]
+    interval: 10s
+    timeout: 3s
+    retries: 3
+
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      CORTEX_SYNC_DOMAIN: ${CORTEX_SYNC_DOMAIN:?set CORTEX_SYNC_DOMAIN}
+      CORTEX_SYNC_UPSTREAMS: ${CORTEX_SYNC_UPSTREAMS:-sync-1:8080}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    mem_limit: 64m
+    logging: *logging
+    depends_on:
+      - sync-1
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - effective_cache_size=192MB
+      - -c
+      - work_mem=2MB
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - max_connections=40
+    environment:
+      POSTGRES_USER: cortex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: cortex_sync
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    mem_limit: 256m
+    shm_size: 64m
+    logging: *logging
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cortex -d cortex_sync"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    image: ghcr.io/cortex-md/sync:${CORTEX_SYNC_VERSION:?set CORTEX_SYNC_VERSION}
+    env_file: .env
+    command: ["migrate", "up"]
+    logging: *logging
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  sync-1: *sync
+
+  sync-2:
+    <<: *sync
+    profiles: ["replicas"]
+
+volumes:
+  pgdata:
+  caddy-data:
+  caddy-config:

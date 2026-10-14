@@ -1,4 +1,4 @@
-.PHONY: build run test test-unit test-integration test-e2e lint fmt migrate-up migrate-down migrate-create docker-up docker-down clean
+.PHONY: build run test test-unit test-e2e sqlc lint fmt migrate-up migrate-down migrate-create docker-up docker-down clean
 
 BINARY_NAME=cortex-sync
 BUILD_DIR=./bin
@@ -19,13 +19,14 @@ test:
 	go test ./... -v -race -count=1
 
 test-unit:
-	go test ./internal/domain/... ./internal/usecase/... -v -race -count=1
-
-test-integration:
-	go test ./test/integration/... -v -race -count=1 -tags=integration
+	go test ./internal/... -race -count=1
 
 test-e2e:
-	go test ./test/e2e/... -v -race -count=1 -tags=e2e
+	docker compose --profile replicas up -d --wait postgres s3 mailpit
+	./test/e2e/run.sh
+
+sqlc:
+	go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.29.0 generate
 
 test-coverage:
 	go test ./... -race -coverprofile=coverage.out -covermode=atomic
@@ -39,10 +40,10 @@ fmt:
 	goimports -w .
 
 migrate-up:
-	CORTEX_DATABASE_URL="$(DATABASE_URL)" CORTEX_DATABASE_MIGRATIONS_PATH=file://$(MIGRATIONS_DIR) go run ./cmd/server migrate up
+	CORTEX_DATABASE_URL="$(DATABASE_URL)" go run ./cmd/server migrate up
 
 migrate-down:
-	CORTEX_DATABASE_URL="$(DATABASE_URL)" CORTEX_DATABASE_MIGRATIONS_PATH=file://$(MIGRATIONS_DIR) go run ./cmd/server migrate down 1
+	CORTEX_DATABASE_URL="$(DATABASE_URL)" go run ./cmd/server migrate down 1
 
 migrate-create:
 	@read -p "Migration name: " name; \

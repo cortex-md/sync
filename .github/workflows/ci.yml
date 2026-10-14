@@ -24,8 +24,18 @@ jobs:
       - run: go test ./... -race -count=1
       - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make test-e2e
+
   image:
-    needs: test
+    needs: [test, e2e]
     runs-on: ubuntu-latest
     if: github.event_name == 'push'
     steps:

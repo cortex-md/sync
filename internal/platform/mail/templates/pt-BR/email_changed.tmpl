@@ -1,0 +1,10 @@
+{{define "subject"}}O e-mail da sua conta Cortex está sendo alterado{{end}}
+{{define "text"}}Olá {{.DisplayName}},
+
+Foi solicitada a troca do e-mail da sua conta no Cortex para {{.NewEmail}}.
+
+Se não foi você, troque sua senha imediatamente.{{end}}
+{{define "preheader"}}Foi solicitada a troca do e-mail da sua conta no Cortex.{{end}}
+{{define "heading"}}Seu e-mail está sendo alterado{{end}}
+{{define "body"}}<p style="margin:0">Olá {{.DisplayName}}, foi solicitada a troca do e-mail da sua conta no Cortex para <strong>{{.NewEmail}}</strong>.</p>{{end}}
+{{define "note"}}Se não foi você, troque sua senha imediatamente.{{end}}

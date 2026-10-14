@@ -13,6 +13,8 @@ type VaultInvite struct {
 	InviteeEmail      string
 	Role              VaultRole
 	EncryptedVaultKey []byte
+	TokenHash         string
+	Grants            []InviteGrant
 	Accepted          bool
 	ExpiresAt         time.Time
 	CreatedAt         time.Time
@@ -31,4 +33,16 @@ type VaultEncryption struct {
 	Salt         []byte
 	EncryptedVEK []byte
 	CreatedAt    time.Time
+}
+
+type InviteDetails struct {
+	VaultInvite
+	VaultName    string
+	InviterName  string
+	InviterEmail string
+}
+
+type InviteGrant struct {
+	Path     string `json:"path"`
+	CanWrite bool   `json:"can_write"`
 }

@@ -1,0 +1,20 @@
+{{define "subject"}}{{.InviterName}} invited you to "{{.VaultName}}" on Cortex{{end}}
+{{define "text"}}{{.InviterName}} invited you to join the vault "{{.VaultName}}" as {{.Role}}.
+
+Accept the invite:
+
+{{.Link}}
+
+The invite expires on {{.ExpiresAt}}.{{end}}
+{{define "role"}}{{if eq .Role "owner"}}Owner{{else if eq .Role "admin"}}Admin{{else if eq .Role "editor"}}Editor{{else if eq .Role "viewer"}}Viewer{{else if eq .Role "guest"}}Guest{{else}}{{.Role}}{{end}}{{end}}
+{{define "preheader"}}Join as {{template "role" .}}. The invite expires on {{.ExpiresAt}}.{{end}}
+{{define "heading"}}{{.InviterName}} invited you to a vault{{end}}
+{{define "body"}}<p style="margin:0">{{.InviterName}} wants you to collaborate on a synced vault in Cortex.</p>{{end}}
+{{define "details"}}<table role="presentation" class="cx-cell" width="100%" cellspacing="0" cellpadding="0" style="margin:18px 0 6px;border-radius:12px;background:#f6f5f3">
+<tr><td class="cx-muted" style="padding:14px 16px 6px;color:#8a847d;font-size:13px">Vault</td><td class="cx-text" align="right" style="padding:14px 16px 6px;color:#1c1917;font-size:14px;font-weight:500">{{.VaultName}}</td></tr>
+<tr><td class="cx-muted" style="padding:6px 16px;color:#8a847d;font-size:13px">Your role</td><td class="cx-text" align="right" style="padding:6px 16px;color:#1c1917;font-size:14px;font-weight:500">{{template "role" .}}</td></tr>
+<tr><td class="cx-muted" style="padding:6px 16px 14px;color:#8a847d;font-size:13px">Expires</td><td class="cx-text" align="right" style="padding:6px 16px 14px;color:#1c1917;font-size:14px;font-weight:500">{{.ExpiresAt}}</td></tr>
+</table>{{end}}
+{{define "cta"}}Accept invite{{end}}
+{{define "note"}}Don't have Cortex yet? You'll be able to download it after accepting.{{end}}
+{{define "why"}}You received this email because someone invited you to a Cortex vault.{{end}}

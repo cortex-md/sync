@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,4 +28,19 @@ type SyncEvent struct {
 	DeviceID  uuid.UUID
 	Metadata  map[string]any
 	CreatedAt time.Time
+}
+
+func (e *SyncEvent) PayloadJSON() ([]byte, error) {
+	data := make(map[string]any, len(e.Metadata)+7)
+	for k, v := range e.Metadata {
+		data[k] = v
+	}
+	data["vault_uuid"] = e.VaultID.String()
+	data["event_type"] = string(e.EventType)
+	data["file_path"] = e.FilePath
+	data["version"] = e.Version
+	data["actor_id"] = e.ActorID.String()
+	data["device_id"] = e.DeviceID.String()
+	data["created_at"] = e.CreatedAt.UTC().Format(time.RFC3339)
+	return json.Marshal(data)
 }

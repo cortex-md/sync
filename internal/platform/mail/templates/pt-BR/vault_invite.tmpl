@@ -1,0 +1,20 @@
+{{define "subject"}}{{.InviterName}} convidou você para "{{.VaultName}}" no Cortex{{end}}
+{{define "text"}}{{.InviterName}} convidou você para participar do vault "{{.VaultName}}" como {{.Role}}.
+
+Aceite o convite:
+
+{{.Link}}
+
+O convite expira em {{.ExpiresAt}}.{{end}}
+{{define "role"}}{{if eq .Role "owner"}}Proprietário{{else if eq .Role "admin"}}Admin{{else if eq .Role "editor"}}Editor{{else if eq .Role "viewer"}}Leitor{{else if eq .Role "guest"}}Convidado{{else}}{{.Role}}{{end}}{{end}}
+{{define "preheader"}}Entre como {{template "role" .}}. O convite expira em {{.ExpiresAt}}.{{end}}
+{{define "heading"}}{{.InviterName}} convidou você para um vault{{end}}
+{{define "body"}}<p style="margin:0">{{.InviterName}} quer colaborar com você em um vault sincronizado no Cortex.</p>{{end}}
+{{define "details"}}<table role="presentation" class="cx-cell" width="100%" cellspacing="0" cellpadding="0" style="margin:18px 0 6px;border-radius:12px;background:#f6f5f3">
+<tr><td class="cx-muted" style="padding:14px 16px 6px;color:#8a847d;font-size:13px">Vault</td><td class="cx-text" align="right" style="padding:14px 16px 6px;color:#1c1917;font-size:14px;font-weight:500">{{.VaultName}}</td></tr>
+<tr><td class="cx-muted" style="padding:6px 16px;color:#8a847d;font-size:13px">Sua função</td><td class="cx-text" align="right" style="padding:6px 16px;color:#1c1917;font-size:14px;font-weight:500">{{template "role" .}}</td></tr>
+<tr><td class="cx-muted" style="padding:6px 16px 14px;color:#8a847d;font-size:13px">Expira em</td><td class="cx-text" align="right" style="padding:6px 16px 14px;color:#1c1917;font-size:14px;font-weight:500">{{.ExpiresAt}}</td></tr>
+</table>{{end}}
+{{define "cta"}}Aceitar convite{{end}}
+{{define "note"}}Ainda não tem o Cortex? Você poderá baixá-lo depois de aceitar.{{end}}
+{{define "why"}}Você recebeu este e-mail porque alguém convidou você para um vault do Cortex.{{end}}

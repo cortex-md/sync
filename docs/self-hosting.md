@@ -30,12 +30,14 @@ or to your private infra repository.
 ```bash
 cd deploy/production
 cp env.example .env
-./scripts/bootstrap-vps.sh
 ```
+
+The VPS needs Docker with the Compose plugin and ports 80 and 443 open.
 
 Edit `.env` and replace every placeholder. At minimum:
 
 - `CORTEX_SYNC_DOMAIN`
+- `CORTEX_SYNC_VERSION`, the image tag to run
 - `POSTGRES_PASSWORD`
 - `CORTEX_DATABASE_URL`, using the same Postgres password
 - `CORTEX_AUTH_ACCESS_TOKEN_SECRET`, at least 32 random characters
@@ -78,7 +80,9 @@ version tags. Deploy an explicit version tag from the VPS:
 ./scripts/deploy.sh v0.1.0
 ```
 
-The deploy script pulls the image, runs migrations, starts Caddy/Postgres/sync, and waits for:
+The deploy script pulls the image, runs migrations, then restarts the two sync replicas one at a
+time, waiting for each to report healthy so Caddy always has a replica to route to. It finishes by
+checking:
 
 ```text
 https://$CORTEX_SYNC_DOMAIN/ready
@@ -110,8 +114,7 @@ Validate a backup with:
 ./scripts/restore-check.sh backups/cortex-sync-YYYYMMDDTHHMMSSZ.dump
 ```
 
-Set `CORTEX_BACKUP_STORAGE_BUCKET` if you want `backup-postgres.sh` to upload database dumps to
-the same storage provider credentials used by the sync server.
+Copy the dumps off the VPS, for example to another bucket, as part of your backup schedule.
 
 Snapshot blobs live in remote object storage. The database contains metadata, users, devices, vault
 membership, sync events, and object keys, so database backups are required for disaster recovery.
@@ -131,4 +134,5 @@ membership, sync events, and object keys, so database backups are required for d
 - Keep `CORTEX_METRICS_ENABLED=false` unless metrics are exposed only on a private network or behind
   your own authentication.
 - Keep the Discord DevOps webhook in a private channel because messages include operational PII.
-- Check `docker compose -f compose.yaml logs --tail=200 sync` after upgrades.
+- Check `docker compose logs --tail=200 sync-1 sync-2` after upgrades.
+- See the feature table in the README to turn off email, collaboration, avatars or guests.

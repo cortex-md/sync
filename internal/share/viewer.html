@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="{{.Lang}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Cortex</title>
+<link rel="icon" href="/assets/v1/logo.png">
+<link rel="stylesheet" href="/assets/v1/cortex.css">
+<link rel="stylesheet" href="/share-assets/viewer.css">
+<script src="/share-assets/viewer.js" defer></script>
+</head>
+<body>
+<div class="lp sp-page" id="share" data-share-id="{{.ShareID}}" data-lang="{{.Lang}}" data-updated="{{.UpdatedAt}}">
+<header class="pn-bar">
+<div class="pn-author"><span class="su-avatar" id="share-avatar" hidden></span><img class="pn-brand" id="share-brand" src="/assets/v1/logo.png" alt=""><span id="share-author">Cortex</span></div>
+<button class="cx-button cx-button--ghost cx-button--icon" id="share-theme" type="button"><svg class="lp-ic" viewBox="0 0 24 24" aria-hidden="true"><path id="share-theme-icon" d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg></button>
+<button class="lp-btn lp-btn--secondary pn-copy" id="share-copy" type="button"><svg class="lp-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg><span id="share-copy-label"></span></button>
+</header>
+
+<div class="pn-state" id="share-state">
+<p class="pn-loading" id="share-loading" role="status"></p>
+<section class="cb-card" id="share-error" hidden>
+<span class="cb-ic warn"><svg class="lp-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></span>
+<h1 id="share-error-title"></h1>
+<p id="share-error-message"></p>
+</section>
+</div>
+
+<div class="pn-layout" id="share-layout" hidden>
+<article class="pn-article">
+<h1 id="share-title"></h1>
+<div class="pn-meta" id="share-meta"></div>
+<iframe class="pn-frame" id="share-content" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"></iframe>
+</article>
+<aside class="pn-toc" id="share-toc" hidden>
+<div class="sd-toc-h" id="share-toc-title"></div>
+<div class="sd-toc-list" id="share-toc-list"></div>
+</aside>
+</div>
+
+<footer class="pn-made"><img src="/assets/v1/logo.png" alt=""><span id="share-made"></span><a href="https://cortex-md.tech" target="_blank" rel="noopener">Cortex</a></footer>
+</div>
+</body>
+</html>

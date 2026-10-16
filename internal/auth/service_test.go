@@ -3,6 +3,7 @@ package auth_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -367,7 +368,7 @@ func TestRefresh_RotationChain(t *testing.T) {
 }
 
 func TestRefresh_ReuseDetection(t *testing.T) {
-	uc, _, _, _ := newTestAuthUsecase()
+	uc, _, _, refreshTokens := newTestAuthUsecase()
 
 	_, err := uc.Register(context.Background(), auth.RegisterInput{
 		Email:    "test@example.com",
@@ -386,6 +387,7 @@ func TestRefresh_ReuseDetection(t *testing.T) {
 		RefreshToken: loginOut.RefreshToken,
 	})
 	require.NoError(t, err)
+	refreshTokens.AgeRotations(time.Minute)
 
 	_, err = uc.Refresh(context.Background(), auth.RefreshInput{
 		RefreshToken: loginOut.RefreshToken,
@@ -393,8 +395,26 @@ func TestRefresh_ReuseDetection(t *testing.T) {
 	assert.ErrorIs(t, err, domain.ErrTokenReuseDetected)
 }
 
-func TestRefresh_ReuseDetectionRevokesEntireFamily(t *testing.T) {
+func TestRefresh_RetryWithinGraceWindowDoesNotRevokeFamily(t *testing.T) {
 	uc, _, _, _ := newTestAuthUsecase()
+	_, err := uc.Register(context.Background(), auth.RegisterInput{Email: "test@example.com", Password: "password123"})
+	require.NoError(t, err)
+	loginOut, err := uc.Login(context.Background(), auth.LoginInput{Email: "test@example.com", Password: "password123", DeviceID: uuid.New()})
+	require.NoError(t, err)
+
+	first, err := uc.Refresh(context.Background(), auth.RefreshInput{RefreshToken: loginOut.RefreshToken})
+	require.NoError(t, err)
+	retried, err := uc.Refresh(context.Background(), auth.RefreshInput{RefreshToken: loginOut.RefreshToken})
+	require.NoError(t, err)
+
+	_, err = uc.Refresh(context.Background(), auth.RefreshInput{RefreshToken: first.RefreshToken})
+	assert.NoError(t, err)
+	_, err = uc.Refresh(context.Background(), auth.RefreshInput{RefreshToken: retried.RefreshToken})
+	assert.NoError(t, err)
+}
+
+func TestRefresh_ReuseDetectionRevokesEntireFamily(t *testing.T) {
+	uc, _, _, refreshTokens := newTestAuthUsecase()
 
 	_, err := uc.Register(context.Background(), auth.RegisterInput{
 		Email:    "test@example.com",
@@ -418,6 +438,7 @@ func TestRefresh_ReuseDetectionRevokesEntireFamily(t *testing.T) {
 		RefreshToken: refresh1.RefreshToken,
 	})
 	require.NoError(t, err)
+	refreshTokens.AgeRotations(time.Minute)
 
 	_, err = uc.Refresh(context.Background(), auth.RefreshInput{
 		RefreshToken: loginOut.RefreshToken,
@@ -515,4 +536,37 @@ func TestLogout_AllDevices(t *testing.T) {
 		RefreshToken: login2.RefreshToken,
 	})
 	assert.ErrorIs(t, err, domain.ErrTokenReuseDetected)
+}
+
+func TestLogin_UpgradesBcryptHashForDerivedKeyAccounts(t *testing.T) {
+	uc, users, _, _ := newTestAuthUsecase()
+	legacy, err := auth.NewBcryptHasherWithCost(4).HashFor(domain.KDFVersionLegacy, "derived-auth-key")
+	require.NoError(t, err)
+	user := &domain.User{ID: uuid.New(), Email: "kdf@example.com", PasswordHash: legacy, KDFVersion: domain.KDFVersionArgon2, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	require.NoError(t, users.Create(context.Background(), user))
+
+	login := func() error {
+		_, err := uc.Login(context.Background(), auth.LoginInput{Email: "kdf@example.com", Password: "derived-auth-key", DeviceID: uuid.New()})
+		return err
+	}
+	require.NoError(t, login())
+
+	stored, err := users.GetByEmail(context.Background(), "kdf@example.com")
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(stored.PasswordHash, "sha256$"))
+	require.NoError(t, login())
+}
+
+func TestLogin_ThrottlesRepeatedFailures(t *testing.T) {
+	uc, _, _, _ := newTestAuthUsecase(func(d *auth.Deps) { d.Throttle = auth.NewLoginThrottle(2) })
+	_, err := uc.Register(context.Background(), auth.RegisterInput{Email: "test@example.com", Password: "password123"})
+	require.NoError(t, err)
+
+	attempt := func(password string) error {
+		_, err := uc.Login(context.Background(), auth.LoginInput{Email: "test@example.com", Password: password, ClientIP: "1.1.1.1", DeviceID: uuid.New()})
+		return err
+	}
+	assert.ErrorIs(t, attempt("wrong-one"), domain.ErrInvalidCredentials)
+	assert.ErrorIs(t, attempt("wrong-two"), domain.ErrInvalidCredentials)
+	assert.ErrorIs(t, attempt("password123"), domain.ErrTooManyAttempts)
 }

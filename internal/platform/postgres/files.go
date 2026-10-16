@@ -38,8 +38,10 @@ func eventVisible(scope domain.Scope, e domain.SyncEvent) bool {
 	return oldPath != "" && scope.CanRead(oldPath)
 }
 
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
 func escapeLike(value string) string {
-	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(value)
+	return likeEscaper.Replace(value)
 }
 
 func rowLimit(limit int) int32 {
@@ -495,6 +497,18 @@ func (r *SyncEventRepository) GetByID(ctx context.Context, id int64) (*domain.Sy
 	return &event, nil
 }
 
+func (r *SyncEventRepository) ListAfter(ctx context.Context, afterID int64, limit int) ([]domain.SyncEvent, error) {
+	rows, err := r.q(ctx).ListSyncEventsAfter(ctx, db.ListSyncEventsAfterParams{AfterID: afterID, RowLimit: int32(limit)})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	events := make([]domain.SyncEvent, len(rows))
+	for i, e := range rows {
+		events[i] = toEvent(e)
+	}
+	return events, nil
+}
+
 func (r *SyncEventRepository) ListByVaultID(ctx context.Context, vaultID uuid.UUID, sinceID int64, limit int) ([]domain.SyncEvent, error) {
 	return r.ListScoped(ctx, vaultID, sinceID, limit, domain.FullScope())
 }
@@ -548,6 +562,21 @@ func (r *SyncEventRepository) LatestID(ctx context.Context, vaultID uuid.UUID) (
 }
 
 func (r *SyncEventRepository) DeleteOlderThan(ctx context.Context, before time.Time) (int64, error) {
-	n, err := r.q(ctx).DeleteSyncEventsBefore(ctx, before)
-	return n, mapError(err)
+	var prunedThrough int64
+	total, err := deleteInBatches(ctx, func(limit int32) (int64, error) {
+		row, err := r.q(ctx).DeleteSyncEventsBefore(ctx, db.DeleteSyncEventsBeforeParams{Before: before, RowLimit: limit})
+		prunedThrough = max(prunedThrough, row.MaxID)
+		return row.Deleted, err
+	})
+	if prunedThrough > 0 {
+		if advanceErr := r.q(ctx).AdvanceSyncEventWatermark(ctx, prunedThrough); advanceErr != nil && err == nil {
+			err = mapError(advanceErr)
+		}
+	}
+	return total, err
+}
+
+func (r *SyncEventRepository) PrunedThrough(ctx context.Context) (int64, error) {
+	id, err := r.q(ctx).GetSyncEventWatermark(ctx)
+	return id, mapError(err)
 }

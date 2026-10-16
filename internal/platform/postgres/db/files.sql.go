@@ -12,6 +12,16 @@ import (
 	"github.com/google/uuid"
 )
 
+const advanceSyncEventWatermark = `-- name: AdvanceSyncEventWatermark :exec
+INSERT INTO sync_event_watermark (id, pruned_through) VALUES (1, $1)
+ON CONFLICT (id) DO UPDATE SET pruned_through = GREATEST(sync_event_watermark.pruned_through, EXCLUDED.pruned_through)
+`
+
+func (q *Queries) AdvanceSyncEventWatermark(ctx context.Context, prunedThrough int64) error {
+	_, err := q.db.Exec(ctx, advanceSyncEventWatermark, prunedThrough)
+	return err
+}
+
 const createDelta = `-- name: CreateDelta :exec
 INSERT INTO file_deltas (id, vault_id, file_path, base_version, target_version, encrypted_delta, size_bytes, created_by, device_id, created_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -113,8 +123,13 @@ func (q *Queries) CreateSyncEvent(ctx context.Context, arg CreateSyncEventParams
 	return id, err
 }
 
-const deleteDeltasBefore = `-- name: DeleteDeltasBefore :execrows
-DELETE FROM file_deltas WHERE vault_id = $1 AND file_path = $2 AND target_version < $3
+const deleteDeltasBefore = `-- name: DeleteDeltasBefore :one
+WITH deleted AS (
+    DELETE FROM file_deltas
+    WHERE vault_id = $1 AND file_path = $2 AND target_version < $3
+    RETURNING size_bytes
+)
+SELECT coalesce(sum(size_bytes), 0)::bigint FROM deleted
 `
 
 type DeleteDeltasBeforeParams struct {
@@ -124,11 +139,10 @@ type DeleteDeltasBeforeParams struct {
 }
 
 func (q *Queries) DeleteDeltasBefore(ctx context.Context, arg DeleteDeltasBeforeParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteDeltasBefore, arg.VaultID, arg.FilePath, arg.BeforeVersion)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+	row := q.db.QueryRow(ctx, deleteDeltasBefore, arg.VaultID, arg.FilePath, arg.BeforeVersion)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const deleteFileLatest = `-- name: DeleteFileLatest :execrows
@@ -234,16 +248,31 @@ func (q *Queries) DeleteSnapshotsByPath(ctx context.Context, arg DeleteSnapshots
 	return items, nil
 }
 
-const deleteSyncEventsBefore = `-- name: DeleteSyncEventsBefore :execrows
-DELETE FROM sync_events WHERE created_at < $1
+const deleteSyncEventsBefore = `-- name: DeleteSyncEventsBefore :one
+WITH deleted AS (
+    DELETE FROM sync_events WHERE id IN (
+        SELECT e.id FROM sync_events e WHERE e.created_at < $1::timestamptz ORDER BY e.created_at LIMIT $2
+    )
+    RETURNING id
+)
+SELECT count(*)::bigint AS deleted, coalesce(max(id), 0)::bigint AS max_id FROM deleted
 `
 
-func (q *Queries) DeleteSyncEventsBefore(ctx context.Context, createdAt time.Time) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteSyncEventsBefore, createdAt)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+type DeleteSyncEventsBeforeParams struct {
+	Before   time.Time
+	RowLimit int32
+}
+
+type DeleteSyncEventsBeforeRow struct {
+	Deleted int64
+	MaxID   int64
+}
+
+func (q *Queries) DeleteSyncEventsBefore(ctx context.Context, arg DeleteSyncEventsBeforeParams) (DeleteSyncEventsBeforeRow, error) {
+	row := q.db.QueryRow(ctx, deleteSyncEventsBefore, arg.Before, arg.RowLimit)
+	var i DeleteSyncEventsBeforeRow
+	err := row.Scan(&i.Deleted, &i.MaxID)
+	return i, err
 }
 
 const getFileLatest = `-- name: GetFileLatest :one
@@ -435,6 +464,17 @@ func (q *Queries) GetSyncEvent(ctx context.Context, id int64) (SyncEvent, error)
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const getSyncEventWatermark = `-- name: GetSyncEventWatermark :one
+SELECT coalesce((SELECT w.pruned_through FROM sync_event_watermark w WHERE w.id = 1), 0)::bigint
+`
+
+func (q *Queries) GetSyncEventWatermark(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, getSyncEventWatermark)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const latestSyncEventID = `-- name: LatestSyncEventID :one
@@ -918,6 +958,45 @@ func (q *Queries) ListSyncEvents(ctx context.Context, arg ListSyncEventsParams) 
 		arg.PathPatterns,
 		arg.RowLimit,
 	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SyncEvent{}
+	for rows.Next() {
+		var i SyncEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.VaultID,
+			&i.EventType,
+			&i.FilePath,
+			&i.Version,
+			&i.ActorID,
+			&i.DeviceID,
+			&i.Metadata,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSyncEventsAfter = `-- name: ListSyncEventsAfter :many
+SELECT id, vault_id, event_type, file_path, version, actor_id, device_id, metadata, created_at FROM sync_events WHERE id > $1 ORDER BY id LIMIT $2
+`
+
+type ListSyncEventsAfterParams struct {
+	AfterID  int64
+	RowLimit int32
+}
+
+func (q *Queries) ListSyncEventsAfter(ctx context.Context, arg ListSyncEventsAfterParams) ([]SyncEvent, error) {
+	rows, err := q.db.Query(ctx, listSyncEventsAfter, arg.AfterID, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}

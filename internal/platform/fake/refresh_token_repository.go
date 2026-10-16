@@ -62,6 +62,8 @@ func (r *RefreshTokenRepository) RevokeIfActive(_ context.Context, id uuid.UUID)
 		return false, nil
 	}
 	token.Revoked = true
+	now := time.Now()
+	token.RotatedAt = &now
 	return true, nil
 }
 
@@ -122,4 +124,15 @@ func (r *RefreshTokenRepository) RevokeAllByUserExceptDevice(_ context.Context, 
 		}
 	}
 	return nil
+}
+
+func (r *RefreshTokenRepository) AgeRotations(by time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, token := range r.tokens {
+		if token.RotatedAt != nil {
+			aged := token.RotatedAt.Add(-by)
+			token.RotatedAt = &aged
+		}
+	}
 }

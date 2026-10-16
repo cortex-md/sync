@@ -1,9 +1,0 @@
-{$CORTEX_SYNC_DOMAIN} {
-	encode zstd gzip
-	reverse_proxy {$CORTEX_SYNC_UPSTREAMS} {
-		lb_policy round_robin
-		health_uri /ready
-		health_interval 5s
-		flush_interval -1
-	}
-}

@@ -255,19 +255,22 @@ func Assets() http.Handler {
 func handleShareError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, domain.ErrNotFound):
-		httpx.WriteError(w, http.StatusNotFound, "not found")
+		httpx.WriteErrorWithCode(w, http.StatusNotFound, "not found", "not_found")
 	case errors.Is(err, domain.ErrInvalidInput):
-		httpx.WriteError(w, http.StatusBadRequest, "invalid share request")
+		httpx.WriteErrorWithCode(w, http.StatusBadRequest, "invalid share request", "invalid_input")
 	case errors.Is(err, domain.ErrVaultAccessDenied), errors.Is(err, domain.ErrInsufficientRole):
 		httpx.WriteErrorWithCode(w, http.StatusForbidden, "you cannot share this note", "insufficient_role")
 	case errors.Is(err, domain.ErrPublicLinksDisabled):
 		httpx.WriteErrorWithCode(w, http.StatusForbidden, "public links are disabled for this vault", "public_links_disabled")
 	case errors.Is(err, domain.ErrFileTooLarge):
-		httpx.WriteError(w, http.StatusRequestEntityTooLarge, "shared note is too large")
+		httpx.WriteErrorWithCode(w, http.StatusRequestEntityTooLarge, "shared note is too large", "file_too_large")
 	case errors.Is(err, domain.ErrQuotaExceeded):
 		httpx.WriteErrorWithCode(w, http.StatusInsufficientStorage, "storage quota exceeded", "quota_exceeded")
 	default:
+		if httpx.WriteDomainError(w, err) {
+			return
+		}
 		log.Error().Err(err).Msg("share request failed")
-		httpx.WriteError(w, http.StatusInternalServerError, "internal server error")
+		httpx.WriteInternalError(w)
 	}
 }

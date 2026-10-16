@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cortexnotes/cortex-sync/internal/domain"
@@ -13,8 +14,10 @@ import (
 )
 
 type TicketSigner struct {
-	key []byte
-	ttl time.Duration
+	key  []byte
+	ttl  time.Duration
+	mu   sync.Mutex
+	used map[string]int64
 }
 
 type ticketClaims struct {
@@ -22,16 +25,17 @@ type ticketClaims struct {
 	VaultID  uuid.UUID `json:"v"`
 	FilePath string    `json:"p"`
 	Expires  int64     `json:"e"`
+	Nonce    string    `json:"n,omitempty"`
 }
 
 func NewTicketSigner(secret string, ttl time.Duration) *TicketSigner {
 	sum := sha256.Sum256([]byte("cortex-collab-ticket:" + secret))
-	return &TicketSigner{key: sum[:], ttl: ttl}
+	return &TicketSigner{key: sum[:], ttl: ttl, used: make(map[string]int64)}
 }
 
 func (s *TicketSigner) Issue(userID, vaultID uuid.UUID, filePath string) (string, time.Time, error) {
 	expiresAt := time.Now().Add(s.ttl)
-	payload, err := json.Marshal(ticketClaims{UserID: userID, VaultID: vaultID, FilePath: filePath, Expires: expiresAt.Unix()})
+	payload, err := json.Marshal(ticketClaims{UserID: userID, VaultID: vaultID, FilePath: filePath, Expires: expiresAt.Unix(), Nonce: uuid.NewString()})
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -59,7 +63,26 @@ func (s *TicketSigner) Verify(ticket string, vaultID uuid.UUID, filePath string)
 	if time.Now().Unix() > claims.Expires || claims.VaultID != vaultID || claims.FilePath != filePath {
 		return uuid.Nil, domain.ErrInvalidCredentials
 	}
+	if !s.consume(signature, claims.Expires) {
+		return uuid.Nil, domain.ErrInvalidCredentials
+	}
 	return claims.UserID, nil
+}
+
+func (s *TicketSigner) consume(signature string, expires int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().Unix()
+	for key, expiry := range s.used {
+		if expiry < now {
+			delete(s.used, key)
+		}
+	}
+	if _, seen := s.used[signature]; seen {
+		return false
+	}
+	s.used[signature] = expires
+	return true
 }
 
 func (s *TicketSigner) sign(body string) []byte {

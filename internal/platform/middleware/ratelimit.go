@@ -1,106 +1,141 @@
 package middleware
 
 import (
-	"net"
+	"container/list"
+	"encoding/json"
+	"math"
 	"net/http"
-	"strings"
+	"strconv"
 	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
 )
 
-type ipEntry struct {
-	limiter  *rate.Limiter
-	lastSeen time.Time
+type limiterEntry struct {
+	key     string
+	limiter *rate.Limiter
 }
 
-type RateLimiter struct {
-	mu                sync.Mutex
-	entries           map[string]*ipEntry
-	r                 rate.Limit
-	burst             int
-	trustProxyHeaders bool
+type KeyedLimiter struct {
+	mu      sync.Mutex
+	entries map[string]*list.Element
+	order   *list.List
+	r       rate.Limit
+	burst   int
+	maxKeys int
 }
 
-type RateLimiterOption func(*RateLimiter)
-
-func WithTrustedProxyHeaders(enabled bool) RateLimiterOption {
-	return func(rl *RateLimiter) {
-		rl.trustProxyHeaders = enabled
+func NewKeyedLimiter(r rate.Limit, burst int, maxKeys int) *KeyedLimiter {
+	if r <= 0 || burst <= 0 {
+		return nil
 	}
+	return &KeyedLimiter{entries: make(map[string]*list.Element), order: list.New(), r: r, burst: burst, maxKeys: max(maxKeys, 1)}
 }
 
-func NewRateLimiter(r rate.Limit, burst int, options ...RateLimiterOption) *RateLimiter {
-	rl := &RateLimiter{
-		entries: make(map[string]*ipEntry),
-		r:       r,
-		burst:   burst,
-	}
-	for _, option := range options {
-		option(rl)
-	}
-	go rl.cleanup()
-	return rl
+func (l *KeyedLimiter) Allow(key string) (bool, time.Duration) {
+	return l.AllowN(key, 1)
 }
 
-func (rl *RateLimiter) getLimiter(ip string) *rate.Limiter {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
-	entry, exists := rl.entries[ip]
-	if !exists {
-		entry = &ipEntry{limiter: rate.NewLimiter(rl.r, rl.burst)}
-		rl.entries[ip] = entry
+func (l *KeyedLimiter) AllowN(key string, n int) (bool, time.Duration) {
+	if l == nil {
+		return true, 0
 	}
-	entry.lastSeen = time.Now()
+	if n > l.burst {
+		return false, -1
+	}
+	now := time.Now()
+	reservation := l.limiter(key).ReserveN(now, n)
+	if delay := reservation.DelayFrom(now); delay > 0 {
+		reservation.CancelAt(now)
+		return false, delay
+	}
+	return true, 0
+}
+
+func (l *KeyedLimiter) Burst() int {
+	if l == nil {
+		return 0
+	}
+	return l.burst
+}
+
+func (l *KeyedLimiter) Len() int {
+	if l == nil {
+		return 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.order.Len()
+}
+
+func (l *KeyedLimiter) limiter(key string) *rate.Limiter {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if element, ok := l.entries[key]; ok {
+		l.order.MoveToFront(element)
+		return element.Value.(*limiterEntry).limiter
+	}
+	for l.order.Len() >= l.maxKeys {
+		oldest := l.order.Back()
+		l.order.Remove(oldest)
+		delete(l.entries, oldest.Value.(*limiterEntry).key)
+	}
+	entry := &limiterEntry{key: key, limiter: rate.NewLimiter(l.r, l.burst)}
+	l.entries[key] = l.order.PushFront(entry)
 	return entry.limiter
 }
 
-func (rl *RateLimiter) cleanup() {
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-	for range ticker.C {
-		rl.mu.Lock()
-		threshold := time.Now().Add(-10 * time.Minute)
-		for ip, entry := range rl.entries {
-			if entry.lastSeen.Before(threshold) {
-				delete(rl.entries, ip)
+func LimitBy(limiter *KeyedLimiter, key func(*http.Request) string) func(http.Handler) http.Handler {
+	if limiter == nil {
+		return passthrough
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if ok, retry := limiter.Allow(key(r)); !ok {
+				WriteLimited(w, http.StatusTooManyRequests, "rate_limited", "too many requests", retry)
+				return
 			}
-		}
-		rl.mu.Unlock()
+			next.ServeHTTP(w, r)
+		})
 	}
 }
 
-func (rl *RateLimiter) clientIP(r *http.Request) string {
-	if rl.trustProxyHeaders {
-		if forwardedFor := r.Header.Get("X-Forwarded-For"); forwardedFor != "" {
-			firstIP := strings.TrimSpace(strings.Split(forwardedFor, ",")[0])
-			if net.ParseIP(firstIP) != nil {
-				return firstIP
-			}
-		}
-		if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); net.ParseIP(realIP) != nil {
-			return realIP
-		}
-	}
-
-	ip, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return ip
+func LimitByIP(limiter *KeyedLimiter) func(http.Handler) http.Handler {
+	return LimitBy(limiter, ClientIPFrom)
 }
 
-func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := rl.clientIP(r)
+func WriteLimited(w http.ResponseWriter, status int, code string, message string, retry time.Duration) {
+	if retry > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retry.Seconds()))))
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message, "code": code})
+}
 
-		if !rl.getLimiter(ip).Allow() {
-			http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
-			return
-		}
+func passthrough(next http.Handler) http.Handler {
+	return next
+}
 
-		next.ServeHTTP(w, r)
-	})
+func LimitBytes(limiter *KeyedLimiter, key func(*http.Request) string) func(http.Handler) http.Handler {
+	if limiter == nil {
+		return passthrough
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.ContentLength > 0 {
+				ok, retry := limiter.AllowN(key(r), int(r.ContentLength))
+				if !ok && retry < 0 {
+					WriteLimited(w, http.StatusRequestEntityTooLarge, "upload_budget_exceeded", "upload exceeds the hourly upload budget", 0)
+					return
+				}
+				if !ok {
+					WriteLimited(w, http.StatusTooManyRequests, "upload_budget_exceeded", "hourly upload budget exhausted", retry)
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }

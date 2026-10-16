@@ -21,6 +21,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./... && go vet -tags "e2e integration" ./...
       - run: go test ./... -race -count=1
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
@@ -32,7 +34,17 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: make test-e2e
+      - run: make ENV_FILE=/dev/null test-e2e
+      - name: Postgres integration tests
+        run: make ENV_FILE=/dev/null test-integration
+      - name: Migrations roll back and reapply
+        env:
+          CORTEX_DATABASE_URL: postgres://cortex:cortex@127.0.0.1:5432/cortex_sync?sslmode=disable
+          CORTEX_AUTH_ACCESS_TOKEN_SECRET: ci-secret-that-is-at-least-32-characters
+        run: |
+          go run ./cmd/server migrate down 1
+          go run ./cmd/server migrate up
+          go run ./cmd/server migrate version
 
   image:
     needs: [test, e2e]
@@ -64,32 +76,3 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-  deploy:
-    needs: image
-    if: startsWith(github.ref, 'refs/tags/v') && vars.DEPLOY_HOST != ''
-    runs-on: ubuntu-latest
-    environment: production
-    concurrency:
-      group: production
-      cancel-in-progress: false
-    env:
-      TARGET: ${{ vars.DEPLOY_USER }}@${{ vars.DEPLOY_HOST }}
-      DEPLOY_DIR: ${{ vars.DEPLOY_DIR || 'cortex-sync' }}
-    steps:
-      - uses: actions/checkout@v5
-      - name: Configure SSH
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
-        run: |
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
-      - name: Upload compose files
-        run: |
-          ssh "$TARGET" "mkdir -p $DEPLOY_DIR/scripts"
-          scp deploy/production/compose.yaml deploy/production/Caddyfile "$TARGET:$DEPLOY_DIR/"
-          scp deploy/production/scripts/*.sh "$TARGET:$DEPLOY_DIR/scripts/"
-      - name: Deploy
-        run: ssh "$TARGET" "sh $DEPLOY_DIR/scripts/deploy.sh ${GITHUB_REF_NAME#v}"

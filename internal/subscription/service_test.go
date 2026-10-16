@@ -552,3 +552,26 @@ func TestGetStatus_NotFound(t *testing.T) {
 	_, err := s.uc.GetStatus(context.Background(), uuid.New())
 	assert.ErrorIs(t, err, domain.ErrNotFound)
 }
+
+func TestHandleWebhookIgnoresEventsOlderThanTheLastApplied(t *testing.T) {
+	s := newSubscriptionTestSetup()
+	userID, subID := uuid.New(), uuid.New()
+	now := time.Now()
+	require.NoError(t, s.subRepo.Create(context.Background(), &domain.Subscription{
+		ID: subID, UserID: userID, ExternalCustomerID: "cust_123", Status: domain.SubscriptionStatusPending, CreatedAt: now, UpdatedAt: now,
+	}))
+
+	cancelled := activeWebhookInput("evt_cancel", "subscription.cancelled", "sub_order", subID.String())
+	_, err := s.uc.HandleWebhook(context.Background(), cancelled)
+	require.NoError(t, err)
+
+	late := activeWebhookInput("evt_late", "subscription.completed", "sub_order", subID.String())
+	late.OccurredAt = cancelled.OccurredAt.Add(-time.Hour)
+	output, err := s.uc.HandleWebhook(context.Background(), late)
+	require.NoError(t, err)
+
+	assert.False(t, output.Processed)
+	stored, err := s.subRepo.GetByUserID(context.Background(), userID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.SubscriptionStatusCancelled, stored.Status)
+}

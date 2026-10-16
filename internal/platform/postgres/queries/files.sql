@@ -119,8 +119,13 @@ WHERE vault_id = @vault_id AND file_path = @file_path AND base_version >= @since
 ORDER BY base_version
 LIMIT @row_limit;
 
--- name: DeleteDeltasBefore :execrows
-DELETE FROM file_deltas WHERE vault_id = @vault_id AND file_path = @file_path AND target_version < @before_version;
+-- name: DeleteDeltasBefore :one
+WITH deleted AS (
+    DELETE FROM file_deltas
+    WHERE vault_id = @vault_id AND file_path = @file_path AND target_version < @before_version
+    RETURNING size_bytes
+)
+SELECT coalesce(sum(size_bytes), 0)::bigint FROM deleted;
 
 -- name: MoveDeltas :exec
 UPDATE file_deltas SET file_path = @new_path WHERE vault_id = @vault_id AND file_path = @old_path;
@@ -146,5 +151,21 @@ LIMIT @row_limit;
 -- name: LatestSyncEventID :one
 SELECT coalesce(max(id), 0)::bigint FROM sync_events WHERE vault_id = $1;
 
--- name: DeleteSyncEventsBefore :execrows
-DELETE FROM sync_events WHERE created_at < $1;
+-- name: DeleteSyncEventsBefore :one
+WITH deleted AS (
+    DELETE FROM sync_events WHERE id IN (
+        SELECT e.id FROM sync_events e WHERE e.created_at < sqlc.arg(before)::timestamptz ORDER BY e.created_at LIMIT sqlc.arg(row_limit)
+    )
+    RETURNING id
+)
+SELECT count(*)::bigint AS deleted, coalesce(max(id), 0)::bigint AS max_id FROM deleted;
+
+-- name: AdvanceSyncEventWatermark :exec
+INSERT INTO sync_event_watermark (id, pruned_through) VALUES (1, @pruned_through)
+ON CONFLICT (id) DO UPDATE SET pruned_through = GREATEST(sync_event_watermark.pruned_through, EXCLUDED.pruned_through);
+
+-- name: GetSyncEventWatermark :one
+SELECT coalesce((SELECT w.pruned_through FROM sync_event_watermark w WHERE w.id = 1), 0)::bigint;
+
+-- name: ListSyncEventsAfter :many
+SELECT * FROM sync_events WHERE id > @after_id ORDER BY id LIMIT @row_limit;

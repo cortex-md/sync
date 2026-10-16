@@ -79,7 +79,11 @@ UPDATE vault_invites SET token_hash = @token_hash WHERE id = @id AND accepted = 
 SELECT * FROM vault_invites WHERE vault_id = $1 ORDER BY created_at;
 
 -- name: ListPendingInvitesByVault :many
-SELECT * FROM vault_invites WHERE vault_id = $1 AND accepted = false ORDER BY created_at;
+SELECT * FROM vault_invites WHERE vault_id = $1 AND accepted = false AND expires_at > now() ORDER BY created_at;
+
+-- name: DeleteExpiredPendingInvite :exec
+DELETE FROM vault_invites
+WHERE vault_id = @vault_id AND lower(invitee_email) = lower(@email::text) AND accepted = false AND expires_at <= now();
 
 -- name: PendingInviteExists :one
 SELECT EXISTS (
@@ -131,3 +135,17 @@ ON CONFLICT (vault_id) DO UPDATE SET salt = EXCLUDED.salt, encrypted_vek = EXCLU
 
 -- name: GetVaultEncryption :one
 SELECT * FROM vault_encryption WHERE vault_id = $1;
+
+-- name: GetVaultForUpdate :one
+SELECT * FROM vaults WHERE id = $1 FOR UPDATE;
+
+-- name: ReconcileVaultStorage :execrows
+UPDATE vaults v SET storage_used_bytes = usage.total
+FROM (
+    SELECT x.id,
+        (coalesce((SELECT sum(s.size_bytes) FROM file_snapshots s WHERE s.vault_id = x.id), 0)
+        + coalesce((SELECT sum(d.size_bytes) FROM file_deltas d WHERE d.vault_id = x.id), 0)
+        + coalesce((SELECT sum(n.size_bytes) FROM note_shares n WHERE n.vault_id = x.id), 0))::bigint AS total
+    FROM vaults x
+) usage
+WHERE v.id = usage.id AND v.storage_used_bytes <> usage.total;

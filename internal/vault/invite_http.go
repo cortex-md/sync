@@ -2,7 +2,6 @@ package vault
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"html/template"
 	"net/http"
@@ -93,8 +92,7 @@ func (h *InviteHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req createInviteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
+	if !httpx.DecodeJSON(w, r, &req) {
 		return
 	}
 
@@ -169,9 +167,9 @@ func (h *InviteHandler) ListMyInvites(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	invites, err := h.invites.ListMyInvites(r.Context(), claims.Email)
+	invites, err := h.invites.ListMyInvites(r.Context(), claims.UserID)
 	if err != nil {
-		httpx.WriteError(w, http.StatusInternalServerError, "failed to list invites")
+		handleVaultError(w, err)
 		return
 	}
 
@@ -201,8 +199,7 @@ func (h *InviteHandler) Accept(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req acceptInviteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
+	if !httpx.DecodeJSON(w, r, &req) {
 		return
 	}
 

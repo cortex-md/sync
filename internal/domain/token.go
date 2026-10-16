@@ -14,6 +14,7 @@ type RefreshToken struct {
 	FamilyID  uuid.UUID
 	ExpiresAt time.Time
 	Revoked   bool
+	RotatedAt *time.Time
 	CreatedAt time.Time
 }
 

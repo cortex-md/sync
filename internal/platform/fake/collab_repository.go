@@ -10,16 +10,18 @@ import (
 )
 
 type CollabDocumentRepository struct {
-	mu        sync.RWMutex
-	updates   []*domain.CollabUpdate
-	documents map[string]*domain.CollabDocument
-	nextID    int64
+	compactedUpTo map[string]int64
+	mu            sync.RWMutex
+	updates       []*domain.CollabUpdate
+	documents     map[string]*domain.CollabDocument
+	nextID        int64
 }
 
 func NewCollabDocumentRepository() *CollabDocumentRepository {
 	return &CollabDocumentRepository{
-		documents: make(map[string]*domain.CollabDocument),
-		nextID:    1,
+		documents:     make(map[string]*domain.CollabDocument),
+		compactedUpTo: make(map[string]int64),
+		nextID:        1,
 	}
 }
 
@@ -120,6 +122,11 @@ func (r *CollabDocumentRepository) CompactDocument(_ context.Context, vaultID uu
 		}
 		r.documents[key] = doc
 	}
+
+	if upToUpdateID <= r.compactedUpTo[key] {
+		return domain.ErrConflict
+	}
+	r.compactedUpTo[key] = upToUpdateID
 
 	stateCopy := make([]byte, len(compactedState))
 	copy(stateCopy, compactedState)

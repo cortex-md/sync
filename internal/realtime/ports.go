@@ -32,6 +32,7 @@ type SyncEventRepository interface {
 	ListByVaultID(ctx context.Context, vaultID uuid.UUID, sinceID int64, limit int) ([]domain.SyncEvent, error)
 	ListScoped(ctx context.Context, vaultID uuid.UUID, sinceID int64, limit int, scope domain.Scope) ([]domain.SyncEvent, error)
 	DeleteOlderThan(ctx context.Context, before time.Time) (int64, error)
+	PrunedThrough(ctx context.Context) (int64, error)
 }
 
 type UserRepository interface {

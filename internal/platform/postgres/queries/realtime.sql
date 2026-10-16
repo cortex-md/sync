@@ -18,12 +18,16 @@ SELECT * FROM collab_updates WHERE vault_id = @vault_id AND file_path = @file_pa
 DELETE FROM collab_updates WHERE vault_id = @vault_id AND file_path = @file_path AND id <= @up_to;
 
 -- name: SaveCompactedCollabDocument :exec
-INSERT INTO collab_documents (vault_id, file_path, compacted_state, state_vector, update_count, updated_at)
-VALUES (@vault_id, @file_path, @compacted_state, NULL, 0, now())
+INSERT INTO collab_documents (vault_id, file_path, compacted_state, state_vector, update_count, compacted_up_to, updated_at)
+VALUES (@vault_id, @file_path, @compacted_state, NULL, 0, @up_to, now())
 ON CONFLICT (vault_id, file_path) DO UPDATE SET
     compacted_state = EXCLUDED.compacted_state,
+    compacted_up_to = EXCLUDED.compacted_up_to,
     update_count = GREATEST(collab_documents.update_count - @removed, 0),
     updated_at = now();
+
+-- name: LockCollabCompaction :one
+SELECT compacted_up_to FROM collab_documents WHERE vault_id = @vault_id AND file_path = @file_path FOR UPDATE;
 
 -- name: DeleteCollabDocument :execrows
 DELETE FROM collab_documents WHERE vault_id = @vault_id AND file_path = @file_path;

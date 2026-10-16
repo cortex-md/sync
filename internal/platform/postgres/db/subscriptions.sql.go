@@ -85,7 +85,7 @@ func (q *Queries) DeleteWebhookEvent(ctx context.Context, id string) error {
 }
 
 const getSubscription = `-- name: GetSubscription :one
-SELECT id, user_id, external_customer_id, external_subscription_id, status, current_period_start, current_period_end, created_at, updated_at, external_checkout_id, entitlement_expires_at, billing_cycle, plan_product_id FROM subscriptions WHERE id = $1
+SELECT id, user_id, external_customer_id, external_subscription_id, status, current_period_start, current_period_end, created_at, updated_at, external_checkout_id, entitlement_expires_at, billing_cycle, plan_product_id, last_event_at FROM subscriptions WHERE id = $1
 `
 
 func (q *Queries) GetSubscription(ctx context.Context, id uuid.UUID) (Subscription, error) {
@@ -105,12 +105,13 @@ func (q *Queries) GetSubscription(ctx context.Context, id uuid.UUID) (Subscripti
 		&i.EntitlementExpiresAt,
 		&i.BillingCycle,
 		&i.PlanProductID,
+		&i.LastEventAt,
 	)
 	return i, err
 }
 
 const getSubscriptionByExternalCheckout = `-- name: GetSubscriptionByExternalCheckout :one
-SELECT id, user_id, external_customer_id, external_subscription_id, status, current_period_start, current_period_end, created_at, updated_at, external_checkout_id, entitlement_expires_at, billing_cycle, plan_product_id FROM subscriptions WHERE external_checkout_id = $1 AND external_checkout_id <> ''
+SELECT id, user_id, external_customer_id, external_subscription_id, status, current_period_start, current_period_end, created_at, updated_at, external_checkout_id, entitlement_expires_at, billing_cycle, plan_product_id, last_event_at FROM subscriptions WHERE external_checkout_id = $1 AND external_checkout_id <> ''
 `
 
 func (q *Queries) GetSubscriptionByExternalCheckout(ctx context.Context, externalCheckoutID string) (Subscription, error) {
@@ -130,12 +131,13 @@ func (q *Queries) GetSubscriptionByExternalCheckout(ctx context.Context, externa
 		&i.EntitlementExpiresAt,
 		&i.BillingCycle,
 		&i.PlanProductID,
+		&i.LastEventAt,
 	)
 	return i, err
 }
 
 const getSubscriptionByExternalCustomer = `-- name: GetSubscriptionByExternalCustomer :one
-SELECT id, user_id, external_customer_id, external_subscription_id, status, current_period_start, current_period_end, created_at, updated_at, external_checkout_id, entitlement_expires_at, billing_cycle, plan_product_id FROM subscriptions WHERE external_customer_id = $1 AND external_customer_id <> ''
+SELECT id, user_id, external_customer_id, external_subscription_id, status, current_period_start, current_period_end, created_at, updated_at, external_checkout_id, entitlement_expires_at, billing_cycle, plan_product_id, last_event_at FROM subscriptions WHERE external_customer_id = $1 AND external_customer_id <> ''
 `
 
 func (q *Queries) GetSubscriptionByExternalCustomer(ctx context.Context, externalCustomerID string) (Subscription, error) {
@@ -155,12 +157,13 @@ func (q *Queries) GetSubscriptionByExternalCustomer(ctx context.Context, externa
 		&i.EntitlementExpiresAt,
 		&i.BillingCycle,
 		&i.PlanProductID,
+		&i.LastEventAt,
 	)
 	return i, err
 }
 
 const getSubscriptionByExternalSubscription = `-- name: GetSubscriptionByExternalSubscription :one
-SELECT id, user_id, external_customer_id, external_subscription_id, status, current_period_start, current_period_end, created_at, updated_at, external_checkout_id, entitlement_expires_at, billing_cycle, plan_product_id FROM subscriptions WHERE external_subscription_id = $1 AND external_subscription_id <> ''
+SELECT id, user_id, external_customer_id, external_subscription_id, status, current_period_start, current_period_end, created_at, updated_at, external_checkout_id, entitlement_expires_at, billing_cycle, plan_product_id, last_event_at FROM subscriptions WHERE external_subscription_id = $1 AND external_subscription_id <> ''
 `
 
 func (q *Queries) GetSubscriptionByExternalSubscription(ctx context.Context, externalSubscriptionID string) (Subscription, error) {
@@ -180,12 +183,13 @@ func (q *Queries) GetSubscriptionByExternalSubscription(ctx context.Context, ext
 		&i.EntitlementExpiresAt,
 		&i.BillingCycle,
 		&i.PlanProductID,
+		&i.LastEventAt,
 	)
 	return i, err
 }
 
 const getSubscriptionByUser = `-- name: GetSubscriptionByUser :one
-SELECT id, user_id, external_customer_id, external_subscription_id, status, current_period_start, current_period_end, created_at, updated_at, external_checkout_id, entitlement_expires_at, billing_cycle, plan_product_id FROM subscriptions WHERE user_id = $1
+SELECT id, user_id, external_customer_id, external_subscription_id, status, current_period_start, current_period_end, created_at, updated_at, external_checkout_id, entitlement_expires_at, billing_cycle, plan_product_id, last_event_at FROM subscriptions WHERE user_id = $1
 `
 
 func (q *Queries) GetSubscriptionByUser(ctx context.Context, userID uuid.UUID) (Subscription, error) {
@@ -205,6 +209,7 @@ func (q *Queries) GetSubscriptionByUser(ctx context.Context, userID uuid.UUID) (
 		&i.EntitlementExpiresAt,
 		&i.BillingCycle,
 		&i.PlanProductID,
+		&i.LastEventAt,
 	)
 	return i, err
 }
@@ -230,8 +235,9 @@ const updateSubscription = `-- name: UpdateSubscription :execrows
 UPDATE subscriptions SET external_customer_id = $1, external_subscription_id = $2,
     external_checkout_id = $3, status = $4, current_period_start = $5,
     current_period_end = $6, entitlement_expires_at = $7,
-    billing_cycle = $8, plan_product_id = $9, updated_at = $10
-WHERE id = $11
+    billing_cycle = $8, plan_product_id = $9, updated_at = $10,
+    last_event_at = $11
+WHERE id = $12
 `
 
 type UpdateSubscriptionParams struct {
@@ -245,6 +251,7 @@ type UpdateSubscriptionParams struct {
 	BillingCycle           string
 	PlanProductID          string
 	UpdatedAt              time.Time
+	LastEventAt            *time.Time
 	ID                     uuid.UUID
 }
 
@@ -260,6 +267,7 @@ func (q *Queries) UpdateSubscription(ctx context.Context, arg UpdateSubscription
 		arg.BillingCycle,
 		arg.PlanProductID,
 		arg.UpdatedAt,
+		arg.LastEventAt,
 		arg.ID,
 	)
 	if err != nil {

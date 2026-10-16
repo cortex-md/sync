@@ -318,6 +318,22 @@ func (q *Queries) ListVaultPresence(ctx context.Context, vaultID uuid.UUID) ([]C
 	return items, nil
 }
 
+const lockCollabCompaction = `-- name: LockCollabCompaction :one
+SELECT compacted_up_to FROM collab_documents WHERE vault_id = $1 AND file_path = $2 FOR UPDATE
+`
+
+type LockCollabCompactionParams struct {
+	VaultID  uuid.UUID
+	FilePath string
+}
+
+func (q *Queries) LockCollabCompaction(ctx context.Context, arg LockCollabCompactionParams) (int64, error) {
+	row := q.db.QueryRow(ctx, lockCollabCompaction, arg.VaultID, arg.FilePath)
+	var compacted_up_to int64
+	err := row.Scan(&compacted_up_to)
+	return compacted_up_to, err
+}
+
 const moveCollabDocument = `-- name: MoveCollabDocument :exec
 UPDATE collab_documents SET file_path = $1 WHERE vault_id = $2 AND file_path = $3
 `
@@ -349,11 +365,12 @@ func (q *Queries) MoveCollabUpdates(ctx context.Context, arg MoveCollabUpdatesPa
 }
 
 const saveCompactedCollabDocument = `-- name: SaveCompactedCollabDocument :exec
-INSERT INTO collab_documents (vault_id, file_path, compacted_state, state_vector, update_count, updated_at)
-VALUES ($1, $2, $3, NULL, 0, now())
+INSERT INTO collab_documents (vault_id, file_path, compacted_state, state_vector, update_count, compacted_up_to, updated_at)
+VALUES ($1, $2, $3, NULL, 0, $4, now())
 ON CONFLICT (vault_id, file_path) DO UPDATE SET
     compacted_state = EXCLUDED.compacted_state,
-    update_count = GREATEST(collab_documents.update_count - $4, 0),
+    compacted_up_to = EXCLUDED.compacted_up_to,
+    update_count = GREATEST(collab_documents.update_count - $5, 0),
     updated_at = now()
 `
 
@@ -361,6 +378,7 @@ type SaveCompactedCollabDocumentParams struct {
 	VaultID        uuid.UUID
 	FilePath       string
 	CompactedState []byte
+	UpTo           int64
 	Removed        int32
 }
 
@@ -369,6 +387,7 @@ func (q *Queries) SaveCompactedCollabDocument(ctx context.Context, arg SaveCompa
 		arg.VaultID,
 		arg.FilePath,
 		arg.CompactedState,
+		arg.UpTo,
 		arg.Removed,
 	)
 	return err

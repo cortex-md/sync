@@ -2,6 +2,7 @@ package realtime
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +15,23 @@ type Event struct {
 	ID        string
 	EventType string
 	Data      string
+	target    *eventTarget
+}
+
+type eventTarget struct {
+	FilePath string `json:"file_path"`
+	OldPath  string `json:"old_path"`
+	UserID   string `json:"user_id"`
+	valid    bool
+}
+
+func (e *Event) resolveTarget() *eventTarget {
+	if e.target == nil {
+		target := &eventTarget{}
+		target.valid = json.Unmarshal([]byte(e.Data), target) == nil
+		e.target = target
+	}
+	return e.target
 }
 
 func (b *EventBroker) PublishSyncEvent(event *domain.SyncEvent) {
@@ -97,6 +115,7 @@ func (b *EventBroker) Publish(vaultID uuid.UUID, event Event) {
 		return
 	}
 
+	event.resolveTarget()
 	for clientID, c := range clients {
 		select {
 		case c.ch <- event:
@@ -109,6 +128,16 @@ func (b *EventBroker) Publish(vaultID uuid.UUID, event Event) {
 	if len(clients) == 0 {
 		delete(b.vaults, vaultID)
 	}
+}
+
+func (b *EventBroker) Vaults() []uuid.UUID {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	ids := make([]uuid.UUID, 0, len(b.vaults))
+	for id := range b.vaults {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 func (b *EventBroker) SubscriberCount(vaultID uuid.UUID) int {

@@ -15,6 +15,8 @@ import (
 const inviteTTL = 7 * 24 * time.Hour
 
 type InviteService struct {
+	emailTrust    EmailTrust
+	maxPending    int
 	invites       VaultInviteRepository
 	members       VaultMemberRepository
 	keys          VaultKeyRepository
@@ -42,7 +44,17 @@ type InviteDeps struct {
 	Authz         *authz.Authorizer
 	PublicURL     string
 	GuestsEnabled bool
+	MaxPending    int
+	EmailTrust    EmailTrust
 }
+
+type EmailTrust int
+
+const (
+	EmailTrustAccount EmailTrust = iota
+	EmailTrustVerified
+	EmailTrustNone
+)
 
 func NewInviteService(d InviteDeps) *InviteService {
 	authorizer := d.Authz
@@ -50,6 +62,8 @@ func NewInviteService(d InviteDeps) *InviteService {
 		authorizer = authz.New(d.Members)
 	}
 	return &InviteService{
+		emailTrust:    d.EmailTrust,
+		maxPending:    d.MaxPending,
 		invites:       d.Invites,
 		members:       d.Members,
 		keys:          d.Keys,
@@ -150,6 +164,15 @@ func (uc *InviteService) Create(ctx context.Context, input CreateInviteInput) (*
 	}
 	if pending {
 		return nil, domain.ErrAlreadyExists
+	}
+	if uc.maxPending > 0 {
+		open, err := uc.invites.ListPendingByVault(ctx, input.VaultID)
+		if err != nil {
+			return nil, err
+		}
+		if len(open) >= uc.maxPending {
+			return nil, domain.ErrLimitReached
+		}
 	}
 
 	inviter, err := uc.users.GetByID(ctx, input.ActorID)
@@ -283,8 +306,27 @@ func (uc *InviteService) ListByVault(ctx context.Context, actorID uuid.UUID, vau
 	return result, nil
 }
 
-func (uc *InviteService) ListMyInvites(ctx context.Context, userEmail string) ([]InviteInfo, error) {
-	details, err := uc.invites.ListPendingForEmail(ctx, domain.NormalizeEmail(userEmail))
+func (uc *InviteService) emailTrusted(user *domain.User) error {
+	switch uc.emailTrust {
+	case EmailTrustNone:
+		return domain.ErrFeatureDisabled
+	case EmailTrustVerified:
+		if user.EmailVerifiedAt == nil {
+			return domain.ErrEmailNotVerified
+		}
+	}
+	return nil
+}
+
+func (uc *InviteService) ListMyInvites(ctx context.Context, userID uuid.UUID) ([]InviteInfo, error) {
+	user, err := uc.users.GetByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if uc.emailTrusted(user) != nil {
+		return []InviteInfo{}, nil
+	}
+	details, err := uc.invites.ListPendingForEmail(ctx, domain.NormalizeEmail(user.Email))
 	if err != nil {
 		return nil, err
 	}
@@ -404,6 +446,9 @@ func (uc *InviteService) Accept(ctx context.Context, input AcceptInviteInput) (*
 		if txErr != nil {
 			return txErr
 		}
+		if len(vault.AllowedEmailDomains) > 0 && uc.emailTrust == EmailTrustVerified && user.EmailVerifiedAt == nil {
+			return domain.ErrEmailNotVerified
+		}
 		if !emailDomainAllowed(vault.AllowedEmailDomains, domain.NormalizeEmail(user.Email)) {
 			return domain.ErrDomainNotAllowed
 		}
@@ -465,6 +510,9 @@ func (uc *InviteService) Accept(ctx context.Context, input AcceptInviteInput) (*
 func (uc *InviteService) resolveInvite(ctx context.Context, input AcceptInviteInput, user *domain.User) (*domain.VaultInvite, error) {
 	if input.Token != "" {
 		return uc.usableInviteByToken(ctx, input.Token)
+	}
+	if err := uc.emailTrusted(user); err != nil {
+		return nil, err
 	}
 	invite, err := uc.invites.GetByID(ctx, input.InviteID)
 	if err != nil {

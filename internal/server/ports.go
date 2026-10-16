@@ -58,9 +58,12 @@ type DeviceRepository interface {
 
 type EmailOutboxRepository interface {
 	Enqueue(ctx context.Context, email *domain.OutboxEmail) error
-	ClaimDue(ctx context.Context, limit int) ([]domain.OutboxEmail, error)
+	Claim(ctx context.Context, id int64, lease time.Duration) (*domain.OutboxEmail, error)
+	ClaimDue(ctx context.Context, limit int, lease time.Duration) ([]domain.OutboxEmail, error)
 	MarkSent(ctx context.Context, id int64) error
-	MarkFailed(ctx context.Context, id int64, lastError string, nextAttemptAt time.Time) error
+	MarkRetry(ctx context.Context, id int64, lastError string, nextAttemptAt time.Time) error
+	MarkDead(ctx context.Context, id int64, lastError string) error
+	DeleteFinished(ctx context.Context, sentBefore, deadBefore time.Time) (int64, error)
 }
 
 type FileDeltaRepository interface {
@@ -133,6 +136,8 @@ type SyncEventRepository interface {
 	ListScoped(ctx context.Context, vaultID uuid.UUID, sinceID int64, limit int, scope domain.Scope) ([]domain.SyncEvent, error)
 	LatestID(ctx context.Context, vaultID uuid.UUID) (int64, error)
 	DeleteOlderThan(ctx context.Context, before time.Time) (int64, error)
+	PrunedThrough(ctx context.Context) (int64, error)
+	ListAfter(ctx context.Context, afterID int64, limit int) ([]domain.SyncEvent, error)
 }
 
 type UserRepository interface {
@@ -200,6 +205,8 @@ type VaultAccessRepository interface {
 type VaultRepository interface {
 	Create(ctx context.Context, v *domain.Vault) error
 	GetByID(ctx context.Context, id uuid.UUID) (*domain.Vault, error)
+	GetForUpdate(ctx context.Context, id uuid.UUID) (*domain.Vault, error)
+	ReconcileStorage(ctx context.Context) (int64, error)
 	ListSummariesForUser(ctx context.Context, userID uuid.UUID) ([]domain.VaultSummary, error)
 	GetSummaryForUser(ctx context.Context, vaultID, userID uuid.UUID) (*domain.VaultSummary, error)
 	Update(ctx context.Context, v *domain.Vault) error

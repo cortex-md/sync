@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/cortexnotes/cortex-sync/internal/domain"
@@ -82,12 +83,19 @@ func (r *CollabDocumentRepository) LoadDocument(ctx context.Context, vaultID uui
 func (r *CollabDocumentRepository) CompactDocument(ctx context.Context, vaultID uuid.UUID, filePath string, compactedState []byte, upToUpdateID int64) error {
 	return r.tx.RunInTx(ctx, func(ctx context.Context) error {
 		q := r.q(ctx)
+		current, err := q.LockCollabCompaction(ctx, db.LockCollabCompactionParams{VaultID: vaultID, FilePath: filePath})
+		if err != nil && !errors.Is(mapError(err), domain.ErrNotFound) {
+			return mapError(err)
+		}
+		if upToUpdateID <= current {
+			return domain.ErrConflict
+		}
 		removed, err := q.DeleteCollabUpdatesUpTo(ctx, db.DeleteCollabUpdatesUpToParams{VaultID: vaultID, FilePath: filePath, UpTo: upToUpdateID})
 		if err != nil {
 			return mapError(err)
 		}
 		return mapError(q.SaveCompactedCollabDocument(ctx, db.SaveCompactedCollabDocumentParams{
-			VaultID: vaultID, FilePath: filePath, CompactedState: compactedState, Removed: int32(removed),
+			VaultID: vaultID, FilePath: filePath, CompactedState: compactedState, Removed: int32(removed), UpTo: upToUpdateID,
 		}))
 	})
 }

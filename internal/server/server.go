@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/cortexnotes/cortex-sync/internal/job"
+	"github.com/cortexnotes/cortex-sync/internal/platform/fake"
+	"github.com/cortexnotes/cortex-sync/internal/platform/revocation"
+	"golang.org/x/time/rate"
 	"net/http"
 	"os"
 	"os/signal"
@@ -58,16 +62,27 @@ type Server struct {
 	listener  *postgres.Listener
 	shares    *share.Service
 	templates *template.Service
+	janitor   *job.BlobJanitor
+	mail      *job.MailDispatcher
 }
 
 func New(ctx context.Context, cfg *config.Config, infra Infra) *Server {
 	features := feature.FromConfig(cfg)
 	repos := infra.Repos
 	life := lifecycle.New()
+	guards := newProtection(cfg)
+
+	var janitor *job.BlobJanitor
+	if repos.BlobQueue != nil {
+		janitor = job.NewBlobJanitor(repos.Tx, repos.BlobQueue, repos.Blobs, cfg.Jobs.SweepInterval)
+		repos.BlobQueue = kickingBlobQueue{BlobQueue: repos.BlobQueue, kick: janitor.Kick}
+	}
 
 	var outbox EmailOutboxRepository
-	if features.Mail {
-		outbox = repos.Outbox
+	var dispatcher *job.MailDispatcher
+	if features.Mail && infra.Mailer != nil && repos.Outbox != nil {
+		dispatcher = job.NewMailDispatcher(repos.Outbox, infra.Mailer)
+		outbox = kickingOutbox{EmailOutboxRepository: repos.Outbox, kick: dispatcher.Kick}
 	}
 	var devOps devops.Notifier = devops.NewNoopNotifier()
 	if cfg.DevOps.DiscordWebhookURL != "" {
@@ -76,9 +91,19 @@ func New(ctx context.Context, cfg *config.Config, infra Infra) *Server {
 		), 64)
 	}
 
-	hasher := auth.NewBcryptHasher()
+	hasher := auth.NewBcryptHasher().WithConcurrency(cfg.Protection.MaxConcurrentPasswordHashes)
 	tokens := auth.NewJWTGenerator(cfg.Auth.AccessTokenSecret, cfg.Auth.AccessTokenExpiry, cfg.Auth.Issuer)
-	authorizer := authz.NewCached(repos.Members)
+	revoked := revocation.New(cfg.Auth.AccessTokenExpiry, infra.Bus)
+	authorizer := authz.NewCached(repos.Members).WithGuestPolicy(func(ctx context.Context, vaultID uuid.UUID) (bool, error) {
+		if !features.Guests {
+			return false, nil
+		}
+		v, err := repos.Vaults.GetByID(ctx, vaultID)
+		if err != nil {
+			return false, err
+		}
+		return v.AllowGuests, nil
+	})
 	infra.Bus.Subscribe(bus.KindAccessChanged, func(signal bus.Signal) {
 		authorizer.Invalidate(signal.VaultID, signal.UserID)
 	})
@@ -87,6 +112,7 @@ func New(ctx context.Context, cfg *config.Config, infra Infra) *Server {
 	})
 
 	accounts := account.NewService(account.Deps{
+		Revoker:       revoked,
 		Users:         repos.Users,
 		Members:       repos.Members,
 		VaultKeys:     repos.Keys,
@@ -120,11 +146,14 @@ func New(ctx context.Context, cfg *config.Config, infra Infra) *Server {
 		Tokens:           tokens,
 		RefreshExpiry:    cfg.Auth.RefreshTokenExpiry,
 		RegistrationMode: cfg.Auth.RegistrationMode,
-		PreloginSecret:   []byte(cfg.Auth.AccessTokenSecret),
+		PreloginSecret:   derivedKey(cfg.Auth.AccessTokenSecret, "cortex-prelogin-salt"),
 		OnRegistered:     onRegistered,
 		DevOps:           devOps,
+		Throttle:         auth.NewLoginThrottle(cfg.Protection.LoginFailuresBeforeLockout),
+		Revoker:          revoked,
+		MaxDevices:       cfg.Tenancy.MaxDevicesPerUser,
 	})
-	devices := device.NewService(device.Deps{Devices: repos.Devices, RefreshTokens: repos.RefreshTokens})
+	devices := device.NewService(device.Deps{Devices: repos.Devices, RefreshTokens: repos.RefreshTokens, Revoker: revoked})
 
 	vaults := vault.NewService(vault.Deps{
 		Vaults:         repos.Vaults,
@@ -138,6 +167,9 @@ func New(ctx context.Context, cfg *config.Config, infra Infra) *Server {
 		Authz:          authorizer,
 		CreationPolicy: features.VaultCreation,
 		QuotaManaged:   features.MultiTenant(),
+		DefaultQuota:   cfg.Tenancy.DefaultVaultQuota,
+		MaxOwnedVaults: cfg.Tenancy.MaxVaultsPerUser,
+		Bus:            infra.Bus,
 	})
 	members := vault.NewMemberService(vault.MemberDeps{
 		Members: repos.Members, Keys: repos.Keys, Users: repos.Users, Access: repos.Access, Tx: repos.Tx, Bus: infra.Bus,
@@ -149,14 +181,15 @@ func New(ctx context.Context, cfg *config.Config, infra Infra) *Server {
 	invites := vault.NewInviteService(vault.InviteDeps{
 		Invites: repos.Invites, Members: repos.Members, Keys: repos.Keys, Users: repos.Users, Vaults: repos.Vaults,
 		Access: repos.Access, Tx: repos.Tx, Outbox: outbox, Bus: infra.Bus, Authz: authorizer,
-		PublicURL: cfg.Server.PublicURL, GuestsEnabled: features.Guests,
+		PublicURL: cfg.Server.PublicURL, GuestsEnabled: features.Guests, MaxPending: cfg.Tenancy.MaxPendingInvites,
+		EmailTrust: inviteEmailTrust(features),
 	})
 	keys := vault.NewKeyService(vault.KeyDeps{Keys: repos.Keys, Members: repos.Members, Users: repos.Users, Bus: infra.Bus, Authz: authorizer})
 	encryption := vault.NewEncryptionService(vault.EncryptionDeps{Encryptions: repos.Encryption, Keys: repos.Keys, Members: repos.Members, Authz: authorizer})
 
 	events := realtime.NewEventBroker(64)
 	var publisher file.EventPublisher
-	if infra.Pool == nil {
+	if infra.PGBus == nil {
 		publisher = events
 	}
 	var shareEntitlement func(ctx context.Context, vaultID uuid.UUID) error
@@ -169,6 +202,7 @@ func New(ctx context.Context, cfg *config.Config, infra Infra) *Server {
 		Tx:           repos.Tx,
 		Authz:        authorizer,
 		MaxBytes:     cfg.Sync.MaxFileSize,
+		MaxPerVault:  cfg.Tenancy.MaxSharesPerVault,
 		EnforceQuota: features.MultiTenant(),
 		Entitled: func(ctx context.Context, vaultID uuid.UUID) error {
 			if shareEntitlement == nil {
@@ -207,6 +241,7 @@ func New(ctx context.Context, cfg *config.Config, infra Infra) *Server {
 			MaxDeltaSizeRatio:       cfg.Sync.MaxDeltaSizeRatio,
 		},
 		MaxFileSize:         cfg.Sync.MaxFileSize,
+		MaxDeltaBytes:       cfg.Protection.MaxDeltaBytes,
 		MaxSnapshotsPerFile: cfg.Sync.MaxSnapshotsPerFile,
 		EnforceQuota:        features.MultiTenant(),
 	})
@@ -236,6 +271,7 @@ func New(ctx context.Context, cfg *config.Config, infra Infra) *Server {
 			PlanProduct:   cfg.Subscription.StripePriceID,
 			RenewalGrace:  cfg.Subscription.RenewalGrace,
 			DevOps:        devOps,
+			Tx:            repos.Tx,
 		})
 		subscriptionHandler = subscription.NewHandler(subscriptionService, subscription.WebhookSecurity{StripeWebhookSecret: cfg.Subscription.StripeWebhookSecret}, entitlementChecker)
 		entitlement = entitlementChecker.Middleware
@@ -275,10 +311,13 @@ func New(ctx context.Context, cfg *config.Config, infra Infra) *Server {
 			FlushInterval: cfg.Collab.FlushInterval,
 			Authz:         authorizer,
 			Guard:         guard,
+			Connections:   connectionLimiter(guards.collabSockets),
+			MessageRate:   rate.Limit(cfg.Protection.CollabMessagesPerSecond),
+			MessageBurst:  cfg.Protection.CollabMessagesBurst,
 		})
 	}
 
-	s := &Server{cfg: cfg, features: features, infra: infra, lifecycle: life, events: events, shares: shares, templates: templates}
+	s := &Server{cfg: cfg, features: features, infra: infra, lifecycle: life, events: events, shares: shares, templates: templates, janitor: janitor, mail: dispatcher}
 	s.handler = newRouter(cfg, features, routes{
 		auth:             auth.NewHandler(authService),
 		account:          account.NewHandler(accounts),
@@ -292,13 +331,14 @@ func New(ctx context.Context, cfg *config.Config, infra Infra) *Server {
 		file:             file.NewHandler(files),
 		share:            share.NewHandler(shares, cfg.Server.PublicURL),
 		template:         template.NewHandler(templates),
-		sse:              realtime.NewSSEHandler(realtime.SSEDeps{Broker: events, Events: repos.Events, Members: repos.Members, Authz: authorizer, Lifecycle: life, Guard: guard}),
+		sse:              realtime.NewSSEHandler(realtime.SSEDeps{Broker: events, Events: repos.Events, Members: repos.Members, Authz: authorizer, Lifecycle: life, Guard: guard, Revoked: revoked.Revoked}),
 		collab:           collab,
 		readiness:        NewReadinessHandler(infra.Pool, repos.Blobs, life),
 		subscription:     subscriptionHandler,
 		entitlement:      entitlement,
 		vaultEntitlement: vaultEntitlement,
-		tokens:           tokens,
+		tokens:           revocation.NewValidator(tokens, revoked),
+		protection:       guards,
 		overview: &OverviewHandler{
 			accounts:      accounts,
 			devices:       devices,
@@ -314,9 +354,17 @@ func New(ctx context.Context, cfg *config.Config, infra Infra) *Server {
 		},
 	})
 
-	if infra.Pool != nil {
+	if infra.Pool != nil && infra.PGBus != nil {
 		s.listener = postgres.NewListener(infra.Pool)
-		s.listener.Handle("sync_events", postgres.SyncEventHandler(repos.Events, events.PublishSyncEvent))
+		relay := postgres.NewSyncEventRelay(repos.Events, events.PublishSyncEvent)
+		s.listener.Handle("sync_events", relay.Handler())
+		s.listener.OnReconnect(relay.CatchUp)
+		s.listener.OnReconnect(func(ctx context.Context) {
+			authorizer.InvalidateAll()
+			for _, vaultID := range events.Vaults() {
+				infra.PGBus.Dispatch(bus.Signal{Kind: bus.KindVaultAccessChanged, VaultID: vaultID})
+			}
+		})
 		s.listener.Handle(postgres.SignalChannel, infra.PGBus.Handler())
 		if entitlementChecker != nil {
 			s.listener.Handle("subscription_updates", postgres.SubscriptionInvalidationHandler(entitlementChecker.Invalidate))
@@ -333,7 +381,7 @@ func (s *Server) Start(ctx context.Context) {
 	if s.listener != nil {
 		go s.listener.Run(ctx)
 	}
-	startBackgroundJobs(ctx, s.cfg, s.features, s.infra, s.shares, s.templates)
+	startBackgroundJobs(ctx, s.cfg, s.features, s.infra, s.shares, s.templates, s.janitor, s.mail)
 }
 
 func (s *Server) Shutdown(srv *http.Server) {
@@ -371,10 +419,15 @@ func NewInfra(ctx context.Context, cfg *config.Config) (Infra, func(), error) {
 		pool.Close()
 		return Infra{}, nil, fmt.Errorf("connecting to object storage: %w", err)
 	}
+	repos := PostgresRepositories(pool, blobs)
+	if cfg.Bus == config.BusMemory {
+		repos.Presence = fake.NewCollabPresenceRepository()
+		return Infra{Pool: pool, Repos: repos, Bus: bus.NewMemory(), Mailer: mailer}, pool.Close, nil
+	}
 	pgBus := postgres.NewSignalBus(pool)
 	return Infra{
 		Pool:   pool,
-		Repos:  PostgresRepositories(pool, blobs),
+		Repos:  repos,
 		Bus:    pgBus,
 		PGBus:  pgBus,
 		Mailer: mailer,
@@ -388,18 +441,34 @@ func newMailer(cfg *config.Config) (Mailer, error) {
 		return nil, nil
 	case "log":
 		renderer, err := mail.NewRenderer()
-		renderer = renderer.WithPublicURL(cfg.Server.PublicURL)
 		if err != nil {
 			return nil, err
 		}
+		renderer = renderer.WithPublicURL(cfg.Server.PublicURL)
 		log.Info().Msg("mail driver: log")
 		return mail.NewLogMailer(renderer), nil
-	default:
+	case "resend":
 		renderer, err := mail.NewRenderer()
-		renderer = renderer.WithPublicURL(cfg.Server.PublicURL)
 		if err != nil {
 			return nil, err
 		}
+		mailer, err := mail.NewResendMailer(mail.ResendConfig{
+			APIKey:  cfg.Mail.ResendAPIKey,
+			URL:     cfg.Mail.ResendURL,
+			From:    cfg.Mail.From,
+			Timeout: cfg.Mail.Timeout,
+		}, renderer.WithPublicURL(cfg.Server.PublicURL))
+		if err != nil {
+			return nil, err
+		}
+		log.Info().Msg("mail driver: resend")
+		return mailer, nil
+	default:
+		renderer, err := mail.NewRenderer()
+		if err != nil {
+			return nil, err
+		}
+		renderer = renderer.WithPublicURL(cfg.Server.PublicURL)
 		mailer, err := mail.NewSMTPMailer(mail.SMTPConfig{
 			Host:     cfg.Mail.Host,
 			Port:     cfg.Mail.Port,
@@ -417,9 +486,22 @@ func newMailer(cfg *config.Config) (Mailer, error) {
 	}
 }
 
+func (s *Server) waitBackground() {
+	if s.mail != nil {
+		s.mail.Wait()
+	}
+}
+
 func Run(cfg *config.Config) error {
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
+
+	if cfg.Database.MigrateOnStart && !cfg.UseFakeRepos {
+		log.Info().Msg("running migrations")
+		if err := postgres.RunMigrationCommand(cfg.Database, []string{"up"}); err != nil {
+			return fmt.Errorf("migrating database: %w", err)
+		}
+	}
 
 	infra, closeInfra, err := NewInfra(ctx, cfg)
 	if err != nil {
@@ -432,6 +514,7 @@ func Run(cfg *config.Config) error {
 
 	s := New(ctx, cfg, infra)
 	s.Start(ctx)
+	defer s.waitBackground()
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	srv := &http.Server{

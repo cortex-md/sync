@@ -79,6 +79,7 @@ type CollabDocument struct {
 	StateVector    []byte
 	UpdateCount    int32
 	UpdatedAt      time.Time
+	CompactedUpTo  int64
 }
 
 type CollabPresence struct {
@@ -128,6 +129,7 @@ type EmailOutbox struct {
 	SentAt        *time.Time
 	LastError     string
 	CreatedAt     time.Time
+	FailedAt      *time.Time
 }
 
 type FileDelta struct {
@@ -203,6 +205,7 @@ type RefreshToken struct {
 	ExpiresAt time.Time
 	Revoked   bool
 	CreatedAt time.Time
+	RotatedAt *time.Time
 }
 
 type Subscription struct {
@@ -219,6 +222,7 @@ type Subscription struct {
 	EntitlementExpiresAt   *time.Time
 	BillingCycle           string
 	PlanProductID          string
+	LastEventAt            *time.Time
 }
 
 type SubscriptionWebhookEvent struct {
@@ -238,6 +242,11 @@ type SyncEvent struct {
 	DeviceID  uuid.UUID
 	Metadata  []byte
 	CreatedAt time.Time
+}
+
+type SyncEventWatermark struct {
+	ID            int16
+	PrunedThrough int64
 }
 
 type TemplateShare struct {

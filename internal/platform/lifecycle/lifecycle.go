@@ -10,6 +10,8 @@ import (
 type Lifecycle struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
+	mu       sync.Mutex
+	closing  bool
 	streams  sync.WaitGroup
 	draining atomic.Bool
 }
@@ -28,8 +30,14 @@ func (l *Lifecycle) Draining() bool {
 }
 
 func (l *Lifecycle) TrackStream() func() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closing {
+		return func() {}
+	}
 	l.streams.Add(1)
-	return l.streams.Done
+	var once sync.Once
+	return func() { once.Do(l.streams.Done) }
 }
 
 func (l *Lifecycle) StartDrain() {
@@ -37,6 +45,9 @@ func (l *Lifecycle) StartDrain() {
 }
 
 func (l *Lifecycle) CloseStreams(timeout time.Duration) bool {
+	l.mu.Lock()
+	l.closing = true
+	l.mu.Unlock()
 	l.cancel()
 	done := make(chan struct{})
 	go func() {

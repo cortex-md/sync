@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"errors"
+	"github.com/rs/zerolog/log"
 	"strings"
 	"time"
 
@@ -25,6 +26,9 @@ type Service struct {
 	registrationMode string
 	preloginSecret   []byte
 	onRegistered     func(ctx context.Context, user *domain.User)
+	throttle         *LoginThrottle
+	maxDevices       int
+	revoker          TokenRevoker
 }
 
 type Transactor interface {
@@ -43,6 +47,9 @@ type Deps struct {
 	PreloginSecret   []byte
 	OnRegistered     func(ctx context.Context, user *domain.User)
 	DevOps           devops.Notifier
+	Throttle         *LoginThrottle
+	MaxDevices       int
+	Revoker          TokenRevoker
 }
 
 func NewService(d Deps) *Service {
@@ -62,6 +69,9 @@ func NewService(d Deps) *Service {
 		preloginSecret:   d.PreloginSecret,
 		onRegistered:     d.OnRegistered,
 		devops:           d.DevOps,
+		throttle:         d.Throttle,
+		maxDevices:       d.MaxDevices,
+		revoker:          d.Revoker,
 	}
 }
 
@@ -153,7 +163,7 @@ func (uc *Service) Register(ctx context.Context, input RegisterInput) (*Register
 		return nil, err
 	}
 
-	hash, err := uc.hasher.Hash(input.Password)
+	hash, err := uc.hasher.HashFor(kdfVersion, input.Password)
 	if err != nil {
 		return nil, err
 	}
@@ -230,6 +240,7 @@ func FakePreloginSalt(secret []byte, email string) []byte {
 type LoginInput struct {
 	Email      string
 	Password   string
+	ClientIP   string
 	DeviceID   uuid.UUID
 	DeviceName string
 	DeviceType string
@@ -247,17 +258,30 @@ func (uc *Service) Login(ctx context.Context, input LoginInput) (*LoginOutput, e
 		return nil, domain.ErrInvalidInput
 	}
 
+	attemptKey := input.Email + "|" + input.ClientIP
+	if retry := uc.throttle.Blocked(attemptKey); retry > 0 {
+		return nil, &RetryError{Err: domain.ErrTooManyAttempts, RetryAfter: retry}
+	}
+
 	user, err := uc.users.GetByEmail(ctx, input.Email)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
+			_ = uc.hasher.Compare(uc.hasher.DummyHash(), input.Password)
+			uc.throttle.Fail(attemptKey)
 			return nil, domain.ErrInvalidCredentials
 		}
 		return nil, err
 	}
 
 	if err := uc.hasher.Compare(user.PasswordHash, input.Password); err != nil {
+		if errors.Is(err, domain.ErrServerBusy) {
+			return nil, err
+		}
+		uc.throttle.Fail(attemptKey)
 		return nil, domain.ErrInvalidCredentials
 	}
+	uc.throttle.Succeed(attemptKey)
+	uc.upgradePasswordHash(ctx, user, input.Password)
 
 	device, err := uc.devices.GetByID(ctx, input.DeviceID)
 	revokedDeviceReactivated := false
@@ -281,6 +305,9 @@ func (uc *Service) Login(ctx context.Context, input LoginInput) (*LoginOutput, e
 			CreatedAt:   time.Now(),
 		}
 
+		if err := uc.checkDeviceLimit(ctx, user.ID); err != nil {
+			return nil, err
+		}
 		if err := uc.devices.Create(ctx, device); err != nil {
 			return nil, err
 		}
@@ -381,7 +408,8 @@ func (uc *Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshOut
 		return nil, err
 	}
 
-	if stored.Revoked {
+	inGrace := stored.Revoked && stored.RotatedAt != nil && time.Since(*stored.RotatedAt) <= refreshReuseGrace
+	if stored.Revoked && !inGrace {
 		_ = uc.refreshTokens.RevokeByFamilyID(ctx, stored.FamilyID)
 		return nil, domain.ErrTokenReuseDetected
 	}
@@ -398,16 +426,6 @@ func (uc *Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshOut
 		_ = uc.refreshTokens.RevokeByFamilyID(ctx, stored.FamilyID)
 		return nil, domain.ErrDeviceRevoked
 	}
-
-	consumed, err := uc.refreshTokens.RevokeIfActive(ctx, stored.ID)
-	if err != nil {
-		return nil, err
-	}
-	if !consumed {
-		_ = uc.refreshTokens.RevokeByFamilyID(ctx, stored.FamilyID)
-		return nil, domain.ErrTokenReuseDetected
-	}
-	_ = uc.devices.UpdateLastSeen(ctx, device.ID)
 
 	user, err := uc.users.GetByID(ctx, stored.UserID)
 	if err != nil {
@@ -434,9 +452,26 @@ func (uc *Service) Refresh(ctx context.Context, input RefreshInput) (*RefreshOut
 		CreatedAt: time.Now(),
 	}
 
-	if err := uc.refreshTokens.Create(ctx, newRT); err != nil {
+	reused := false
+	if err := uc.runInTx(ctx, func(ctx context.Context) error {
+		if !inGrace {
+			consumed, err := uc.refreshTokens.RevokeIfActive(ctx, stored.ID)
+			if err != nil {
+				return err
+			}
+			if !consumed {
+				reused = true
+				return domain.ErrTokenReuseDetected
+			}
+		}
+		return uc.refreshTokens.Create(ctx, newRT)
+	}); err != nil {
+		if reused {
+			_ = uc.refreshTokens.RevokeByFamilyID(ctx, stored.FamilyID)
+		}
 		return nil, err
 	}
+	_ = uc.devices.UpdateLastSeen(ctx, device.ID)
 
 	return &RefreshOutput{
 		AccessToken:  accessToken,
@@ -452,9 +487,21 @@ type LogoutInput struct {
 
 func (uc *Service) Logout(ctx context.Context, input LogoutInput) error {
 	if input.AllDevices {
-		return uc.refreshTokens.RevokeAllByUserID(ctx, input.UserID)
+		if err := uc.refreshTokens.RevokeAllByUserID(ctx, input.UserID); err != nil {
+			return err
+		}
+		if uc.revoker != nil {
+			uc.revoker.RevokeUser(ctx, input.UserID)
+		}
+		return nil
 	}
-	return uc.refreshTokens.RevokeAllByDeviceID(ctx, input.DeviceID)
+	if err := uc.refreshTokens.RevokeAllByDeviceID(ctx, input.DeviceID); err != nil {
+		return err
+	}
+	if uc.revoker != nil {
+		uc.revoker.RevokeDevice(ctx, input.DeviceID)
+	}
+	return nil
 }
 
 func (uc *Service) notifyDevOps(ctx context.Context, event devops.Event) {
@@ -462,4 +509,48 @@ func (uc *Service) notifyDevOps(ctx context.Context, event devops.Event) {
 		return
 	}
 	_ = uc.devops.Notify(ctx, event)
+}
+
+func (uc *Service) upgradePasswordHash(ctx context.Context, user *domain.User, password string) {
+	if !uc.hasher.NeedsRehash(user.PasswordHash, user.KDFVersion) {
+		return
+	}
+	hash, err := uc.hasher.HashFor(user.KDFVersion, password)
+	if err != nil {
+		return
+	}
+	user.PasswordHash = hash
+	user.UpdatedAt = time.Now()
+	if err := uc.users.Update(ctx, user); err != nil {
+		log.Warn().Err(err).Str("user_id", user.ID.String()).Msg("auth: password hash upgrade failed")
+	}
+}
+
+func (uc *Service) checkDeviceLimit(ctx context.Context, userID uuid.UUID) error {
+	if uc.maxDevices <= 0 {
+		return nil
+	}
+	devices, err := uc.devices.ListByUserID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	active := 0
+	for i := range devices {
+		if !devices[i].Revoked {
+			active++
+		}
+	}
+	if active >= uc.maxDevices {
+		return domain.ErrLimitReached
+	}
+	return nil
+}
+
+const refreshReuseGrace = 30 * time.Second
+
+func (uc *Service) runInTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	if uc.tx == nil {
+		return fn(ctx)
+	}
+	return uc.tx.RunInTx(ctx, fn)
 }

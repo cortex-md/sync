@@ -1554,3 +1554,67 @@ func TestFileUsecase_BulkGetFileInfo_NotVaultMember(t *testing.T) {
 	})
 	assert.ErrorIs(t, err, domain.ErrVaultAccessDenied)
 }
+
+func TestFileUsecase_ListChanges_RejectsCursorsOlderThanRetention(t *testing.T) {
+	deps := setupFileTest()
+	vaultID := uuid.New()
+	userID := uuid.New()
+	deviceID := uuid.New()
+	addTestMember(t, deps, vaultID, userID, domain.VaultRoleOwner)
+	uploadTestSnapshot(t, deps, userID, deviceID, vaultID, "notes/a.md", []byte("a"))
+	uploadTestSnapshot(t, deps, userID, deviceID, vaultID, "notes/b.md", []byte("b"))
+
+	_, err := deps.events.DeleteOlderThan(context.Background(), time.Now().Add(time.Minute))
+	require.NoError(t, err)
+	uploadTestSnapshot(t, deps, userID, deviceID, vaultID, "notes/c.md", []byte("c"))
+
+	_, err = deps.uc.ListChanges(context.Background(), userID, vaultID, 1, 100)
+	assert.ErrorIs(t, err, domain.ErrCursorExpired)
+
+	fresh, err := deps.uc.ListChanges(context.Background(), userID, vaultID, 2, 100)
+	require.NoError(t, err)
+	assert.Len(t, fresh.Events, 1)
+	assert.False(t, fresh.HasMore)
+}
+
+func TestFileUsecase_SnapshotReleasesDeltaBytesFromVaultStorage(t *testing.T) {
+	vaults := fake.NewVaultRepository()
+	deps := setupFileTest(func(d *file.Deps) { d.Vaults = vaults })
+	vaultID, userID, deviceID := uuid.New(), uuid.New(), uuid.New()
+	require.NoError(t, vaults.Create(context.Background(), &domain.Vault{ID: vaultID, Name: "v", OwnerID: userID, CreatedAt: time.Now(), UpdatedAt: time.Now()}))
+	addTestMember(t, deps, vaultID, userID, domain.VaultRoleOwner)
+
+	uploadTestSnapshot(t, deps, userID, deviceID, vaultID, "notes/a.md", []byte("v1"))
+	_, err := deps.uc.UploadDelta(context.Background(), file.UploadDeltaInput{
+		UserID: userID, DeviceID: deviceID, VaultID: vaultID, FilePath: "notes/a.md",
+		BaseVersion: 1, Checksum: "c2", SizeBytes: 2, EncryptedData: []byte("delta-bytes"),
+	})
+	require.NoError(t, err)
+	stored, err := vaults.GetByID(context.Background(), vaultID)
+	require.NoError(t, err)
+	require.EqualValues(t, len("v1")+len("delta-bytes"), stored.StorageUsedBytes)
+
+	uploadTestSnapshot(t, deps, userID, deviceID, vaultID, "notes/a.md", []byte("v3"))
+
+	stored, err = vaults.GetByID(context.Background(), vaultID)
+	require.NoError(t, err)
+	assert.EqualValues(t, len("v1")+len("v3"), stored.StorageUsedBytes)
+}
+
+func TestFileUsecase_UploadDelta_RetryAfterLostResponseIsIdempotent(t *testing.T) {
+	deps := setupFileTest()
+	vaultID, userID, deviceID := uuid.New(), uuid.New(), uuid.New()
+	addTestMember(t, deps, vaultID, userID, domain.VaultRoleOwner)
+	uploadTestSnapshot(t, deps, userID, deviceID, vaultID, "notes/a.md", []byte("v1"))
+	input := file.UploadDeltaInput{UserID: userID, DeviceID: deviceID, VaultID: vaultID, FilePath: "notes/a.md", BaseVersion: 1, Checksum: "c2", SizeBytes: 2, EncryptedData: []byte("delta")}
+
+	first, err := deps.uc.UploadDelta(context.Background(), input)
+	require.NoError(t, err)
+	retried, err := deps.uc.UploadDelta(context.Background(), input)
+	require.NoError(t, err)
+	assert.Equal(t, first.Version, retried.Version)
+
+	input.DeviceID = uuid.New()
+	_, err = deps.uc.UploadDelta(context.Background(), input)
+	assert.ErrorIs(t, err, domain.ErrConflict)
+}

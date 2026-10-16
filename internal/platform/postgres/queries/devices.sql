@@ -49,7 +49,7 @@ SELECT * FROM refresh_tokens WHERE token_hash = $1;
 UPDATE refresh_tokens SET revoked = true WHERE id = $1;
 
 -- name: RevokeRefreshTokenIfActive :execrows
-UPDATE refresh_tokens SET revoked = true WHERE id = $1 AND revoked = false;
+UPDATE refresh_tokens SET revoked = true, rotated_at = now() WHERE id = $1 AND revoked = false;
 
 -- name: RevokeRefreshTokenFamily :exec
 UPDATE refresh_tokens SET revoked = true WHERE family_id = $1;
@@ -64,7 +64,9 @@ UPDATE refresh_tokens SET revoked = true WHERE device_id = $1;
 UPDATE refresh_tokens SET revoked = true WHERE user_id = @user_id AND device_id <> @device_id;
 
 -- name: DeleteExpiredRefreshTokens :execrows
-DELETE FROM refresh_tokens WHERE expires_at < now() AND revoked = true;
+DELETE FROM refresh_tokens WHERE id IN (
+    SELECT t.id FROM refresh_tokens t WHERE t.expires_at < now() ORDER BY t.expires_at LIMIT sqlc.arg(row_limit)
+);
 
 -- name: ListDevicesByUsers :many
 SELECT * FROM devices WHERE user_id = ANY(@user_ids::uuid[]) AND revoked = false ORDER BY user_id, created_at;

@@ -21,6 +21,7 @@ const (
 )
 
 type Service struct {
+	maxPerVault  int
 	shares       ShareRepository
 	vaults       VaultStorage
 	files        FileLookup
@@ -42,6 +43,7 @@ type Deps struct {
 	Tx           Transactor
 	Authz        *authz.Authorizer
 	MaxBytes     int64
+	MaxPerVault  int
 	EnforceQuota bool
 	Entitled     func(ctx context.Context, vaultID uuid.UUID) error
 }
@@ -53,6 +55,7 @@ func NewService(d Deps) *Service {
 		files:        d.Files,
 		blobs:        d.Blobs,
 		queue:        d.BlobQueue,
+		maxPerVault:  d.MaxPerVault,
 		tx:           d.Tx,
 		authz:        d.Authz,
 		maxBytes:     d.MaxBytes,
@@ -111,6 +114,9 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (*domain.NoteSh
 	}
 	if latest.Deleted {
 		return nil, false, domain.ErrNotFound
+	}
+	if err := s.checkShareLimit(ctx, input.VaultID, input.FilePath); err != nil {
+		return nil, false, err
 	}
 
 	id, err := newShareID()
@@ -349,6 +355,25 @@ func (s *Service) release(ctx context.Context, removed []domain.RemovedShare) er
 		if err := s.vaults.AddStorage(ctx, vaultID, -size); err != nil && !errors.Is(err, domain.ErrNotFound) {
 			return err
 		}
+	}
+	return nil
+}
+
+func (s *Service) checkShareLimit(ctx context.Context, vaultID uuid.UUID, filePath string) error {
+	if s.maxPerVault <= 0 {
+		return nil
+	}
+	existing, err := s.shares.ListByVault(ctx, vaultID)
+	if err != nil {
+		return err
+	}
+	for i := range existing {
+		if existing[i].FilePath == filePath {
+			return nil
+		}
+	}
+	if len(existing) >= s.maxPerVault {
+		return domain.ErrLimitReached
 	}
 	return nil
 }

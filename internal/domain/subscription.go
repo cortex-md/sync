@@ -27,6 +27,7 @@ type Subscription struct {
 	EntitlementExpiresAt   time.Time
 	BillingCycle           string
 	PlanProductID          string
+	LastEventAt            time.Time
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
 }

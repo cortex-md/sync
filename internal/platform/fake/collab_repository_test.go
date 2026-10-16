@@ -297,3 +297,22 @@ func TestCollabDocumentRepository_BatchStoreUpdates_AccumulatesAcrossCalls(t *te
 	assert.Equal(t, 3, doc.UpdateCount)
 	assert.Len(t, stored, 3)
 }
+
+func TestCollabDocumentRepository_CompactDocument_RejectsOlderCompaction(t *testing.T) {
+	repo := fake.NewCollabDocumentRepository()
+	ctx := context.Background()
+	vaultID := uuid.New()
+	for i := 0; i < 4; i++ {
+		require.NoError(t, repo.StoreUpdate(ctx, &domain.CollabUpdate{VaultID: vaultID, FilePath: "doc.md", Data: []byte{byte(i)}}))
+	}
+	_, stored, err := repo.LoadDocument(ctx, vaultID, "doc.md")
+	require.NoError(t, err)
+
+	require.NoError(t, repo.CompactDocument(ctx, vaultID, "doc.md", []byte("newer"), stored[3].ID))
+	err = repo.CompactDocument(ctx, vaultID, "doc.md", []byte("older"), stored[1].ID)
+
+	assert.ErrorIs(t, err, domain.ErrConflict)
+	doc, _, err := repo.LoadDocument(ctx, vaultID, "doc.md")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("newer"), doc.CompactedState)
+}

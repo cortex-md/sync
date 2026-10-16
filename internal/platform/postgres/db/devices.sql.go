@@ -73,11 +73,13 @@ func (q *Queries) CreateRefreshToken(ctx context.Context, arg CreateRefreshToken
 }
 
 const deleteExpiredRefreshTokens = `-- name: DeleteExpiredRefreshTokens :execrows
-DELETE FROM refresh_tokens WHERE expires_at < now() AND revoked = true
+DELETE FROM refresh_tokens WHERE id IN (
+    SELECT t.id FROM refresh_tokens t WHERE t.expires_at < now() ORDER BY t.expires_at LIMIT $1
+)
 `
 
-func (q *Queries) DeleteExpiredRefreshTokens(ctx context.Context) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteExpiredRefreshTokens)
+func (q *Queries) DeleteExpiredRefreshTokens(ctx context.Context, rowLimit int32) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredRefreshTokens, rowLimit)
 	if err != nil {
 		return 0, err
 	}
@@ -125,7 +127,7 @@ func (q *Queries) GetDeviceByToken(ctx context.Context, deviceToken string) (Dev
 }
 
 const getRefreshTokenByHash = `-- name: GetRefreshTokenByHash :one
-SELECT id, user_id, device_id, token_hash, family_id, expires_at, revoked, created_at FROM refresh_tokens WHERE token_hash = $1
+SELECT id, user_id, device_id, token_hash, family_id, expires_at, revoked, created_at, rotated_at FROM refresh_tokens WHERE token_hash = $1
 `
 
 func (q *Queries) GetRefreshTokenByHash(ctx context.Context, tokenHash string) (RefreshToken, error) {
@@ -140,6 +142,7 @@ func (q *Queries) GetRefreshTokenByHash(ctx context.Context, tokenHash string) (
 		&i.ExpiresAt,
 		&i.Revoked,
 		&i.CreatedAt,
+		&i.RotatedAt,
 	)
 	return i, err
 }
@@ -334,7 +337,7 @@ func (q *Queries) RevokeRefreshTokenFamily(ctx context.Context, familyID uuid.UU
 }
 
 const revokeRefreshTokenIfActive = `-- name: RevokeRefreshTokenIfActive :execrows
-UPDATE refresh_tokens SET revoked = true WHERE id = $1 AND revoked = false
+UPDATE refresh_tokens SET revoked = true, rotated_at = now() WHERE id = $1 AND revoked = false
 `
 
 func (q *Queries) RevokeRefreshTokenIfActive(ctx context.Context, id uuid.UUID) (int64, error) {

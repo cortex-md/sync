@@ -19,22 +19,38 @@ const (
 	relayRetention           = 5 * time.Minute
 )
 
-func startBackgroundJobs(ctx context.Context, cfg *config.Config, features feature.Set, infra Infra, shares *share.Service, templates *template.Service) {
+func startBackgroundJobs(ctx context.Context, cfg *config.Config, features feature.Set, infra Infra, shares *share.Service, templates *template.Service, janitor *job.BlobJanitor, dispatcher *job.MailDispatcher) {
 	repos := infra.Repos
+	locker := repos.Locker
+	if cfg.Deployment == config.DeploymentSingle {
+		locker = nil
+	}
+
+	maintenance := []job.CleanupTask{
+		job.ExpiredRefreshTokens(repos.RefreshTokens),
+		job.ExpiredInvites(repos.Invites),
+		job.OldSyncEvents(repos.Events, cfg.Sync.EventRetention),
+		{Name: "user_tokens", Run: repos.UserTokens.DeleteExpired},
+		{Name: "expired_shares", Run: shares.RemoveExpired},
+		{Name: "template_review", Run: templates.ReviewPending},
+		job.AtMostEvery(24*time.Hour, job.CleanupTask{Name: "vault_storage_reconcile", Run: repos.Vaults.ReconcileStorage}),
+	}
+	if dispatcher != nil {
+		maintenance = append(maintenance,
+			job.CleanupTask{Name: "email_outbox_sweep", Run: dispatcher.Sweep},
+			job.CleanupTask{Name: "email_outbox_retention", Run: dispatcher.PruneFinished},
+		)
+		go dispatcher.Run(ctx)
+	} else {
+		log.Info().Msg("mail dispatcher disabled")
+	}
 
 	go job.NewCleaner(job.CleanerConfig{
 		Interval: time.Hour,
 		Tx:       repos.Tx,
-		Locker:   repos.Locker,
+		Locker:   locker,
 		LockKey:  maintenanceLockKey,
-		Tasks: []job.CleanupTask{
-			job.ExpiredRefreshTokens(repos.RefreshTokens),
-			job.ExpiredInvites(repos.Invites),
-			job.OldSyncEvents(repos.Events, cfg.Sync.EventRetention),
-			{Name: "user_tokens", Run: repos.UserTokens.DeleteExpired},
-			{Name: "expired_shares", Run: shares.RemoveExpired},
-			{Name: "template_review", Run: templates.ReviewPending},
-		},
+		Tasks:    maintenance,
 	}).Run(ctx)
 
 	var realtimeTasks []job.CleanupTask
@@ -52,19 +68,14 @@ func startBackgroundJobs(ctx context.Context, cfg *config.Config, features featu
 		go job.NewCleaner(job.CleanerConfig{
 			Interval: time.Minute,
 			Tx:       repos.Tx,
-			Locker:   repos.Locker,
+			Locker:   locker,
 			LockKey:  realtimeLockKey,
 			Tasks:    realtimeTasks,
 		}).Run(ctx)
 	}
 
-	if repos.BlobQueue != nil {
-		go job.NewBlobJanitor(repos.Tx, repos.BlobQueue, repos.Blobs, time.Minute).Run(ctx)
+	if janitor != nil {
+		go janitor.Run(ctx)
 	}
 
-	if infra.Mailer != nil {
-		go job.NewMailWorker(repos.Tx, repos.Outbox, infra.Mailer, 3*time.Second).Run(ctx)
-	} else {
-		log.Info().Msg("mail worker disabled")
-	}
 }

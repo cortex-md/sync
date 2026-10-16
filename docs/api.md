@@ -6,13 +6,60 @@ Base URL: `http://localhost:8080`
 
 ### Error Response
 
+Every error, including rate limits, body limits and panics, uses the same shape:
+
 ```json
 {
-  "error": "string",
-  "code": "string (optional)",
+  "error": "human readable message",
+  "code": "machine_readable_code",
   "details": "any (optional)"
 }
 ```
+
+Clients should branch on `code`, never on `error`. When a handler has no specific code, the code
+follows the status: `400 invalid_input`, `401 unauthorized`, `402 subscription_required`,
+`403 forbidden`, `404 not_found`, `409 already_exists`, `410 gone`, `413 file_too_large`,
+`429 rate_limited`, `503 unavailable` and `internal_error` for other `5xx`.
+
+### Retry-After
+
+`429` and `503` responses caused by a limit carry `Retry-After` (seconds) when the server knows
+how long to wait: rate limiters report the time until a token is available, `server_busy` uses
+`5`, the login lockout reports the remaining lockout. Clients should wait at least that long before
+retrying the same request.
+
+### Abuse protection
+
+Limits depend on `CORTEX_PROTECTION` (see [configuration.md](configuration.md#protection)) and
+are published under `limits` in [capabilities](#get-metav1capabilities).
+
+| Limit | Scope | Response |
+|-------|-------|----------|
+| Requests | per client IP, every route | `429 rate_limited` |
+| Sensitive routes (prelogin, register, login, password, email, key setup, invite preview) | per client IP | `429 rate_limited` |
+| Registrations | per client IP per hour | `429 rate_limited` |
+| Public pages (avatars, invite, share and template pages) | per client IP | `429 rate_limited` |
+| Reads (GET/HEAD) and writes | per user | `429 rate_limited` |
+| Heavy routes (overviews, first `files/list` page, share publish, template writes) | per user | `429 rate_limited` |
+| Concurrent uploads | per instance and per user | `503 server_busy` |
+| Upload bytes per hour | per user | `429 upload_budget_exceeded`, or `413 upload_budget_exceeded` when one upload exceeds the whole budget |
+| Concurrent batch downloads | per user | `503 server_busy` |
+| SSE streams | per user and per instance | `503 server_busy` |
+| Collab sockets | per user | `429 rate_limited` before the upgrade |
+| Collab messages | per socket | close `4429` |
+| Failed logins | per email + client IP | `429 too_many_attempts` |
+| Password hashing | per instance | `503 server_busy` |
+
+Body limits apply to every route: JSON bodies above `limits.max_json_body_bytes` return
+`413 payload_too_large`; snapshot and share uploads accept up to `limits.max_upload_bytes`
+(`413 file_too_large`) and avatars up to `limits.avatar_max_bytes`.
+
+### Response headers
+
+- `X-Request-ID` is echoed when the request sends one made of up to 64 letters, digits, `-` or
+  `_`; otherwise the server generates one.
+- `X-Content-Type-Options: nosniff` on every response.
+- `Cache-Control: no-store` on every `/auth/...` and `/account/...` response.
 
 ### Authentication
 
@@ -37,9 +84,11 @@ feature is disabled returns:
 
 | Feature | Env | Routes |
 |---------|-----|--------|
-| collab | `CORTEX_FEATURE_COLLAB` | `/sync/v1/vaults/{vaultID}/collab`, `/collab/tickets`, `/collab/peers`, `/presence` |
-| avatars | `CORTEX_FEATURE_AVATARS` | `PUT/DELETE /account/v1/me/avatar`, `GET /avatars/v1/...` |
-| guests | `CORTEX_FEATURE_GUESTS` | Guest invites and assigning the `guest` role |
+| collab | `collab` in `CORTEX_FEATURES` | `/sync/v1/vaults/{vaultID}/collab`, `/collab/tickets`, `/collab/peers`, `/presence` |
+| avatars | `avatars` in `CORTEX_FEATURES` | `PUT/DELETE /account/v1/me/avatar`, `GET /avatars/v1/...` |
+| guests | `guests` in `CORTEX_FEATURES` | Guest invites and assigning the `guest` role |
+| public_links | `public_links` in `CORTEX_FEATURES` | `/sync/v1/vaults/{vaultID}/shares/...`, `/s/{id}`, `/share/v1/{id}`, `/template/v1/...` |
+| email_invites | `CORTEX_MAIL_DRIVER` not `none` | Accepting by `invite_id` (`GET /vaults/v1/invites` returns `[]` instead) |
 | email_verification | `CORTEX_FEATURE_EMAIL_VERIFICATION` | `/account/v1/email/verify`, `/account/v1/email/confirm-change`, `POST /account/v1/me/email/verification` |
 | password_reset | `CORTEX_FEATURE_PASSWORD_RESET` | `/account/v1/password/forgot`, `/account/v1/password/reset`, `/account/v1/password/reset/prepare` |
 
@@ -62,12 +111,36 @@ downloads, batch responses and SSE are never compressed.
 
 | Status | Code | Condition |
 |--------|------|-----------|
+| 400 | `invalid_input` | Malformed body, header or query parameter |
+| 401 | `unauthorized` | Missing or malformed `Authorization` header |
+| 401 | `token_invalid` | Access token invalid, expired or revoked (logout, device revoke, password change or reset) |
 | 401 | `device_mismatch` | `X-Device-ID` does not match the token's device |
+| 401 | `invalid_credentials` | Wrong email or password |
 | 402 | `subscription_required` / `subscription_expired` | See [Subscription](#subscription) |
+| 403 | `vault_access_denied` | Not a member of the vault (or a guest while guests are off for it) |
 | 403 | `insufficient_role` | Role or path access does not allow the action |
 | 403 | `domain_not_allowed` | Email domain not in the vault's `allowed_email_domains` |
+| 403 | `email_not_verified` | Email-addressed invite or domain-restricted vault while the caller's email is unverified |
+| 403 | `limit_reached` | Account cap reached: vaults, devices, pending invites or shares (multi-tenant mode) |
+| 403 | `registration_closed` | Registration is closed |
+| 404 | `not_found` | Resource not found (also a deleted file's latest version) |
 | 404 | `feature_disabled` | Feature disabled on this server |
 | 409 | `conflict` | File version conflict |
+| 409 | `path_exists` | Rename target already exists |
+| 409 | `already_exists` | Resource already exists (member, pending invite, `id` conflict) |
+| 409 | `key_exists` | A vault key is already granted to that member |
+| 409 | `keys_not_set_up` | The account has no identity keys yet |
+| 410 | `cursor_expired` | `since` / `Last-Event-ID` is older than the retained history; run a full resync |
+| 410 | `invite_expired` | Invite has expired |
+| 411 | `length_required` | Upload without `Content-Length` |
+| 413 | `payload_too_large` | JSON body above `limits.max_json_body_bytes` |
+| 413 | `file_too_large` | Upload or batch above the file, upload or batch limit |
+| 413 | `delta_too_large` | Delta above `limits.max_delta_bytes`; upload a snapshot instead |
+| 413 / 429 | `upload_budget_exceeded` | Hourly upload byte budget exhausted (`429`) or smaller than this upload (`413`) |
+| 429 | `rate_limited` | Rate limit hit; see `Retry-After` |
+| 429 | `too_many_attempts` | Login locked after repeated failures; see `Retry-After` |
+| 500 | `internal_error` | Unexpected server error |
+| 503 | `server_busy` | Concurrency cap reached; retry after `Retry-After` |
 | 507 | `quota_exceeded` | Vault storage quota exceeded (multi-tenant mode) |
 
 ---
@@ -107,24 +180,38 @@ Public. Lets clients adapt to the server configuration. `Cache-Control: public, 
     "collab": true,
     "avatars": true,
     "guests": true,
-    "email": false,
-    "email_verification": false,
-    "password_reset": false,
+    "public_links": true,
+    "email": true,
+    "email_invites": true,
+    "email_verification": true,
+    "password_reset": true,
     "subscription": false,
     "registration_mode": "open|first-user|closed",
     "vault_creation": "everyone|admins"
   },
   "limits": {
-    "max_file_size": 104857600,
-    "max_upload_bytes": 104857600,
+    "max_file_size": 26214400,
+    "max_upload_bytes": 26214400,
+    "max_json_body_bytes": 2097152,
+    "max_delta_bytes": 1048576,
     "avatar_max_bytes": 5242880,
     "batch_max_items": 200,
-    "batch_max_bytes": 67108864
+    "batch_max_bytes": 67108864,
+    "max_concurrent_uploads_per_user": 2,
+    "upload_bytes_per_hour": 524288000,
+    "max_event_streams_per_user": 8,
+    "max_collab_sockets_per_user": 16,
+    "default_vault_quota_bytes": 1073741824,
+    "max_vaults_per_user": 10,
+    "max_devices_per_user": 10,
+    "protection": "off|standard|strict"
   }
 }
 ```
 
-`email` is `true` when `CORTEX_MAIL_DRIVER` is `log` or `smtp`.
+The example shows `CORTEX_PROTECTION=standard` in multi-tenant mode. `email` and `email_invites`
+are `true` when `CORTEX_MAIL_DRIVER` is `log`, `smtp` or `resend`. Limits that are `0` (disabled)
+are omitted, except the size limits, batch limits and `protection`, which are always present.
 
 ---
 
@@ -200,9 +287,11 @@ required. Without it the account is legacy (`kdf_version: 0`) and no key field m
 
 | Status | Code | Condition |
 |--------|------|-----------|
-| 400 | | Invalid input |
+| 400 | `invalid_input` | Invalid input, or a legacy (`kdf_version: 0`) password longer than 72 bytes |
 | 403 | `registration_closed` | `CORTEX_AUTH_REGISTRATION_MODE` is `closed`, or `first-user` and a user exists |
 | 409 | `user_exists` | Email already registered |
+| 429 | `rate_limited` | Per-IP registration or sensitive limit |
+| 503 | `server_busy` | Password hashing capacity exhausted |
 
 The first account created on a server becomes the instance admin (`is_instance_admin`).
 
@@ -240,14 +329,25 @@ The first account created on a server becomes the instance admin (`is_instance_a
 
 `public_key` and `encrypted_private_key` are `null` for `kdf_version: 0` accounts.
 
+`kdf_version: 1` accounts are verified against a SHA-256 of the derived auth key; accounts still
+stored with bcrypt are rehashed on the next successful login. Unknown emails run the same
+comparison, so timing does not reveal whether an account exists.
+
+After `CORTEX_PROTECTION_LOGIN_FAILURES_BEFORE_LOCKOUT` failures for the same email and client IP,
+login is locked for 1 minute, doubling with each further failure up to 1 hour. A successful login
+clears the counter.
+
 **Errors**
 
 | Status | Code | Condition |
 |--------|------|-----------|
-| 400 | | Invalid input or device_id |
-| 401 | | Invalid credentials |
+| 400 | `invalid_input` | Invalid input or device_id |
+| 401 | `invalid_credentials` | Invalid credentials |
 | 403 | `device_revoked` | Device has been revoked |
+| 403 | `limit_reached` | New device above `CORTEX_TENANCY_MAX_DEVICES_PER_USER` |
 | 409 | `device_conflict` | `device_id` belongs to another account; generate a new one |
+| 429 | `too_many_attempts` | Login locked; `Retry-After` carries the remaining lockout |
+| 503 | `server_busy` | Password hashing capacity exhausted |
 
 ### POST /auth/v1/token/refresh
 
@@ -268,13 +368,19 @@ The first account created on a server becomes the instance admin (`is_instance_a
 }
 ```
 
+Rotation happens in one transaction: the presented token is consumed and a new one is issued.
+Presenting the same refresh token again within 30 seconds of its rotation (for example a retry
+after a lost response, or two tabs racing) returns a fresh pair instead of triggering reuse
+detection. After that window a rotated token counts as reuse.
+
 **Errors**
 
 | Status | Code | Condition |
 |--------|------|-----------|
+| 401 | `invalid_credentials` | Unknown refresh token |
 | 401 | `token_expired` | Token expired |
-| 401 | `token_revoked` | Token revoked |
 | 401 | `token_reuse` | Token reuse detected, all sessions revoked |
+| 403 | `device_revoked` | The token's device was revoked |
 
 ### POST /auth/v1/logout
 
@@ -295,6 +401,14 @@ Requires authentication.
   "status": "ok"
 }
 ```
+
+Logout revokes the refresh tokens and, immediately, the access tokens of the device (or of every
+device with `all_devices`); revoked access tokens get `401 token_invalid` on every instance. The
+same immediate revocation applies to device revoke, password change (every device except the
+current one) and password reset (every device).
+
+Access tokens are HS256 JWTs; validation requires the configured issuer, `exp` and `iat`, with a
+30 second leeway.
 
 ---
 
@@ -609,7 +723,8 @@ Requires admin or owner. Every field is optional; omitted fields are unchanged.
 
 **Response** `204` (no body)
 
-Blobs are queued for asynchronous deletion.
+Blobs are queued for asynchronous deletion. Every member's open SSE and collab connections for the
+vault are closed on every instance.
 
 **Errors**
 
@@ -642,7 +757,8 @@ caller's role.
 | Field | Present when |
 |-------|--------------|
 | `my_access` | Always; the caller's compiled access (see [Path access](#path-access)). `all: true` for owner/admin |
-| `members`, `devices`, `groups` | Caller can read members (viewer and above); otherwise `[]` |
+| `members`, `groups` | Caller can read members (viewer and above); otherwise `[]` |
+| `devices` | Caller can read members. Admins and owners see every member device; other roles only see devices that have synced this vault |
 | `access_rules` | Caller can manage members (admin, owner); omitted otherwise |
 | `invites` | Caller can manage invites (admin, owner); pending, unexpired only |
 | `presence` | Collab enabled; filtered to paths the caller can read |
@@ -832,7 +948,18 @@ entitlement when subscription enforcement is enabled.
 }
 ```
 
-`grants` is only present for guest invites. Invites expire after 7 days.
+`grants` is only present for guest invites. Invites expire after 7 days. A vault holds at most one
+pending invite per email address.
+
+**Email trust.** An invite is addressed to an email, but only a link (token) proves possession of
+it. How the server treats the email itself depends on the mail driver:
+
+| `CORTEX_MAIL_DRIVER` | Email-addressed invites (`GET /vaults/v1/invites`, accept by `invite_id`) | Vaults with `allowed_email_domains` |
+|----------------------|------------------------------------|-------------------------------------|
+| `none` | Off: the list is `[]` and accept by `invite_id` returns `404 feature_disabled`. Only the invite link works | Domain checked against the account email |
+| `log`, `smtp`, `resend` | Require a verified email (`403 email_not_verified`; the list is `[]` until verified) | Accept requires a verified email (`403 email_not_verified`) |
+
+`features.email_invites` in capabilities reports which mode is active.
 
 ### POST /vaults/v1/{vaultID}/invites/
 
@@ -864,17 +991,17 @@ rotates the token (see [Idempotent creates](#idempotent-creates)).
 
 | Status | Code | Condition |
 |--------|------|-----------|
-| 400 | | Invalid email, role, grants or non-base64 encrypted_vault_key |
+| 400 | `invalid_input` | Invalid email, role, grants or non-base64 encrypted_vault_key |
 | 403 | `insufficient_role` | Requires admin or owner, or role not below the inviter's |
 | 403 | `domain_not_allowed` | Invitee email domain not in `allowed_email_domains` |
+| 403 | `limit_reached` | Vault already has `CORTEX_TENANCY_MAX_PENDING_INVITES_PER_VAULT` pending invites |
 | 404 | `feature_disabled` | Guest invite while guests are disabled on the server or `allow_guests` is `false` |
-| 409 | | User already a member, pending invite exists, or `id` conflict |
+| 409 | `already_exists` | User already a member, pending invite exists for that email, or `id` conflict |
 
 ### GET /vaults/v1/{vaultID}/invites/
 
-Requires admin or owner. Returns the vault invites that were not accepted yet (expired ones stay until
-the cleaner removes them), oldest first, without `encrypted_vault_key`, `invite_token` or
-`invite_url`.
+Requires admin or owner. Returns the vault invites that are neither accepted nor expired, oldest
+first, without `encrypted_vault_key`, `invite_token` or `invite_url`.
 
 **URL Params**: `vaultID` (uuid)
 
@@ -888,8 +1015,9 @@ the cleaner removes them), oldest first, without `encrypted_vault_key`, `invite_
 
 ### GET /vaults/v1/invites
 
-Returns pending invites for the authenticated user's email, with `inviter_name` and
-`encrypted_vault_key`.
+Returns pending, unexpired invites for the authenticated user's email, with `inviter_name` and
+`encrypted_vault_key`. Returns `[]` when mail is disabled or the caller's email is not verified
+(see [Email trust](#invite-object)).
 
 **Response** `200` — array of invite objects.
 
@@ -905,7 +1033,8 @@ Returns pending invites for the authenticated user's email, with `inviter_name` 
 { "invite_id": "uuid" }
 ```
 
-`token` works for any account; `invite_id` requires the caller's email to match the invite.
+`token` works for any account; `invite_id` requires the caller's email to match the invite and the
+email trust rules above.
 
 **Response** `200` — vault object (`role` from the invite) plus `encrypted_vault_key` when the invite
 carried one. Emits `member_joined`.
@@ -914,11 +1043,13 @@ carried one. Emits `member_joined`.
 
 | Status | Code | Condition |
 |--------|------|-----------|
-| 400 | | Invalid `invite_id` |
-| 403 | | `invite_id` belongs to another email |
+| 400 | `invalid_input` | Invalid `invite_id` |
+| 403 | `vault_access_denied` | `invite_id` belongs to another email |
+| 403 | `email_not_verified` | Mail enabled and the caller's email is unverified (`invite_id`, or a vault with `allowed_email_domains`) |
 | 403 | `domain_not_allowed` | Caller's email domain not allowed in the vault |
-| 404 | | Invite not found |
-| 409 | | Invite already used, or caller already a member |
+| 404 | `not_found` | Invite not found |
+| 404 | `feature_disabled` | `invite_id` while mail is disabled, or guest invite while guests are off |
+| 409 | `already_exists` | Invite already used, or caller already a member |
 | 410 | `invite_expired` | Invite has expired |
 
 ---
@@ -1046,23 +1177,33 @@ Upload an encrypted file snapshot.
 | X-File-Path-Encoding | No | Set to `uri` when `X-File-Path` is percent-encoded (required for non-ASCII paths) |
 | X-Base-Version | No | Expected current version; a mismatch returns `409 conflict` without storing the upload |
 | X-Local-Hash | No | Client-computed checksum |
+| X-Checksum | No | Alias for `X-Local-Hash`, used when `X-Local-Hash` is absent |
 | X-Content-Type | No | Original content type (defaults to `application/octet-stream`) |
-| Content-Length | No | Size in bytes; chunked uploads are accepted |
+| Content-Length | Yes | Size in bytes; chunked uploads without it are rejected with `411` |
 
 **Body**: Raw binary (encrypted file content)
 
 **Response** `201` (file info object, including `snapshot_id`)
 
-**Deduplication**: If `X-Local-Hash` matches the checksum of the current, non-deleted version, no new snapshot is created. The response returns the existing file info with status `201`, so retries are idempotent. Uploading identical content to a deleted file creates a new version and restores it.
+**Deduplication**: If the checksum matches the current, non-deleted version, no new snapshot is
+created and the response is `200` with the existing file info, so retries are idempotent.
+Uploading identical content to a deleted file creates a new version and restores it.
+
+If the outcome of the metadata commit is unknown (for example the database connection drops
+during commit), the uploaded blob is kept rather than deleted, so a commit that did succeed never
+points at a missing object.
 
 **Errors**
 
 | Status | Code | Condition |
 |--------|------|-----------|
-| 400 | | Missing or invalid X-File-Path / X-Base-Version |
+| 400 | `invalid_input` | Missing or invalid X-File-Path / X-Base-Version |
 | 403 | `insufficient_role` | No `edit` access to the path |
 | 409 | `conflict` | X-Base-Version mismatch or concurrent upload won the version |
-| 413 | | File too large (exceeds `CORTEX_SYNC_MAX_FILE_SIZE`) |
+| 411 | `length_required` | Missing `Content-Length` |
+| 413 | `file_too_large` | Body above `limits.max_upload_bytes` or file above `limits.max_file_size` |
+| 413 / 429 | `upload_budget_exceeded` | Hourly upload byte budget (see [Abuse protection](#abuse-protection)) |
+| 503 | `server_busy` | Too many concurrent uploads |
 | 507 | `quota_exceeded` | Vault storage quota would be exceeded (multi-tenant mode) |
 
 ### GET /sync/v1/vaults/{vaultID}/files
@@ -1078,6 +1219,17 @@ Download an encrypted file snapshot.
 | path | Yes | Vault-relative file path |
 | version | No | Specific version (default: latest) |
 
+Without `version` the latest snapshot is served and `X-File-Version` is the file's current version
+(it can be ahead of the snapshot when deltas follow it). With `version` the server serves the
+newest snapshot at or before that version and both `X-File-Version` and `X-Snapshot-Version`
+report the served snapshot's version.
+
+**Request Headers**
+
+| Header | Description |
+|--------|-------------|
+| If-None-Match | `ETag` of a previous download |
+
 **Response** `200`
 
 Body: Raw binary (encrypted file content)
@@ -1089,20 +1241,26 @@ Body: Raw binary (encrypted file content)
 | Content-Type | `application/octet-stream` |
 | X-File-Path | File path |
 | X-File-Path-Encoded | Percent-encoded file path, safe for non-ASCII names |
-| X-File-Version | Version number |
+| X-File-Version | Version number (see above) |
+| X-Snapshot-Version | Version of the served snapshot |
 | X-Checksum | File checksum |
 | X-Size-Bytes | File size |
 | X-Created-By | User UUID who created this version |
-| X-Device-ID | Device UUID that created this version |
+| X-Author-Device-ID | Device UUID that created this snapshot |
+| X-Device-ID | Same as `X-Author-Device-ID` (kept for older clients) |
 | X-Snapshot-ID | Snapshot UUID |
+| ETag | `"<snapshot id>"` |
+| Cache-Control | `private, max-age=31536000, immutable` with `version`, `private, no-cache` for latest |
+
+**Response** `304` when `If-None-Match` equals the snapshot's `ETag` (same headers, no body).
 
 **Errors**
 
-| Status | Condition |
-|--------|-----------|
-| 400 | Missing path param |
-| 403 | Vault access denied or no `view` access to the path |
-| 404 | File not found |
+| Status | Code | Condition |
+|--------|------|-----------|
+| 400 | `invalid_input` | Missing path param |
+| 403 | `vault_access_denied` / `insufficient_role` | Vault access denied or no `view` access to the path |
+| 404 | `not_found` | File not found, or the latest version of a deleted file |
 
 ### POST /sync/v1/vaults/{vaultID}/files/batch
 
@@ -1120,7 +1278,9 @@ Download many snapshots in one streamed response.
 ```
 
 `version: 0` means latest. Limits: 1–200 items and 64 MB total snapshot size
-(`limits.batch_max_items` / `limits.batch_max_bytes` in capabilities).
+(`limits.batch_max_items` / `limits.batch_max_bytes` in capabilities). Each user can run one batch
+at a time (`CORTEX_PROTECTION_MAX_CONCURRENT_BATCHES_PER_USER`, `503 server_busy` otherwise), and
+the server reads at most 16 MiB of snapshot data ahead of what it has written.
 
 **Response** `200`, `Content-Type: application/vnd.cortex.batch`, `X-Batch-Count: <items>`.
 The body is one frame per requested item, in request order:
@@ -1152,11 +1312,12 @@ Frame header:
 
 **Errors** (before streaming starts)
 
-| Status | Condition |
-|--------|-----------|
-| 400 | Empty or more than 200 items, empty path, or negative version |
-| 403 | Vault access denied |
-| 413 | Total size above 64 MB |
+| Status | Code | Condition |
+|--------|------|-----------|
+| 400 | `invalid_input` | Empty or more than 200 items, empty path, or negative version |
+| 403 | `vault_access_denied` | Vault access denied |
+| 413 | `file_too_large` | Total size above 64 MB |
+| 503 | `server_busy` | Another batch of the same user is running |
 
 ### DELETE /sync/v1/vaults/{vaultID}/files
 
@@ -1212,15 +1373,22 @@ The `needs_snapshot` field is only present (and `true`) when the server determin
 - **Delta count threshold**: More than N consecutive deltas since the last snapshot (default: 10, configurable via `CORTEX_SYNC_MAX_DELTAS_BEFORE_SNAPSHOT`)
 - **Delta size ratio**: Accumulated delta bytes since last snapshot exceed a ratio of the last snapshot size (default: 0.5, configurable via `CORTEX_SYNC_MAX_DELTA_SIZE_RATIO`)
 
-When the client uploads a new snapshot, the server automatically cleans up old deltas that precede the new snapshot version. Setting either threshold to 0 disables that check.
+When the client uploads a new snapshot, the server automatically cleans up old deltas that precede the new snapshot version and releases their bytes from the vault's storage usage. Setting either threshold to 0 disables that check.
+
+**Retries**: resending a delta that was already applied (same `base_version`, `checksum` and
+device, and the file is now at `base_version + 1`) returns the current file info instead of
+`409`.
 
 **Errors**
 
 | Status | Code | Condition |
 |--------|------|-----------|
-| 400 | | Invalid input or non-base64 encrypted_data |
+| 400 | `invalid_input` | Invalid input or non-base64 encrypted_data |
 | 403 | `insufficient_role` | No `edit` access to the path |
-| 409 | `conflict` | Version conflict (base_version mismatch) |
+| 409 | `conflict` | Version conflict (base_version mismatch) or the file is deleted |
+| 413 | `delta_too_large` | Delta above `limits.max_delta_bytes`; upload a snapshot instead |
+| 413 | `payload_too_large` | Request body above `limits.max_json_body_bytes` |
+| 507 | `quota_exceeded` | Vault storage quota would be exceeded (multi-tenant mode) |
 
 ### GET /sync/v1/vaults/{vaultID}/files/deltas
 
@@ -1270,16 +1438,18 @@ carries the `since_version` for the next page.
 
 **Response** `200` (file info object of the renamed file)
 
-The caller needs `edit` access on both paths.
+The caller needs `edit` access on both paths. Both paths are locked in sorted order, so
+concurrent renames cannot deadlock; transactions that still hit a deadlock or serialization
+failure are retried by the server.
 
 **Errors**
 
 | Status | Code | Condition |
 |--------|------|-----------|
-| 400 | | Missing old_path or new_path |
+| 400 | `invalid_input` | Missing old_path or new_path |
 | 403 | `insufficient_role` | Viewer, or guest without write access to both paths |
-| 404 | | Source file not found |
-| 409 | | Target path already exists |
+| 404 | `not_found` | Source file not found |
+| 409 | `path_exists` | Target path already exists |
 
 ### POST /sync/v1/vaults/{vaultID}/files/bulk
 
@@ -1330,7 +1500,7 @@ Lists current files ordered by path, limited to paths the caller can view.
 | Param | Required | Description |
 |-------|----------|-------------|
 | include_deleted | No | `true` to include deleted files |
-| limit | No | Page size; `0` or omitted returns every file, values above 5000 are capped |
+| limit | No | Page size; `0` or omitted uses 1000, values above 5000 are capped |
 | cursor | No | Value of `X-Next-Cursor` from the previous page |
 
 **Request Headers**
@@ -1395,7 +1565,14 @@ can view.
 | Param | Required | Description |
 |-------|----------|-------------|
 | since | No | Return events after this event ID (int64) |
-| limit | No | Max events to return (default 100, max 1000) |
+| limit | No | Max events to return (default 100; values above 1000 are clamped to 1000) |
+
+**Response Headers**
+
+| Header | Description |
+|--------|-------------|
+| X-Has-More | `true` when the page is full and more events may follow |
+| X-Next-Cursor | ID of the last returned event; pass it as `since` for the next page (absent when the page is empty) |
 
 **Response** `200`
 
@@ -1414,6 +1591,14 @@ can view.
   }
 ]
 ```
+
+**Errors**
+
+| Status | Code | Condition |
+|--------|------|-----------|
+| 400 | `invalid_input` | Invalid `since` or `limit` |
+| 403 | `vault_access_denied` | Vault access denied |
+| 410 | `cursor_expired` | `since` is older than the retained history (`CORTEX_SYNC_EVENT_RETENTION`); run a full resync from `GET /files/list` and continue from its `X-Latest-Event-ID` |
 
 ### PUT /sync/v1/vaults/{vaultID}/cursor
 
@@ -1438,7 +1623,7 @@ Stores the calling device's sync position for this vault (shown in the overviews
 
 ## Shared notes (public links)
 
-Requires `CORTEX_FEATURE_PUBLIC_LINKS=true` (default); otherwise these routes answer
+Requires `public_links` in `CORTEX_FEATURES` (on by default); otherwise these routes answer
 `404 {"code":"feature_disabled"}`. Links are end-to-end encrypted: the client encrypts the note
 with a random 32-byte link key `K`, uploads only ciphertext, and puts `K` in the URL fragment
 (`https://host/s/{id}#k=<base64url K>`), which browsers never send to the server.
@@ -1634,13 +1819,13 @@ triggers the review; switching to `team`/`link` publishes immediately.
 
 Query: `kind=note|database` (optional, `400` otherwise), `q` (optional, case-insensitive match on
 name and description). Array of public template objects for published `market` templates, newest
-first, at most 100. Gated by `CORTEX_FEATURE_PUBLIC_LINKS`.
+first, at most 100. Gated by the `public_links` feature.
 
 ### GET /template/v1/{slug} (public)
 
 `{"template": <public template object>, "payload": "base64"}` for a `link` template or a published
-`market` template. `team`, pending and rejected templates answer `404`. Gated by
-`CORTEX_FEATURE_PUBLIC_LINKS`.
+`market` template. `team`, pending and rejected templates answer `404`. Gated by the
+`public_links` feature.
 
 ---
 
@@ -1659,7 +1844,8 @@ Long-lived streaming connection.
 |--------|----------|-------------|
 | Last-Event-ID | No | Resume from this event ID for replay |
 
-**Response**: `200` with `Content-Type: text/event-stream`
+**Response**: `200` with `Content-Type: text/event-stream`. The first frame is `retry: 5000`, so
+browsers' `EventSource` waits 5 seconds before reconnecting.
 
 **Event Types**
 
@@ -1702,6 +1888,15 @@ event: ping
 data: {}
 ```
 
+`reset` (no `id`), sent instead of the replay when `Last-Event-ID` is older than the retained
+history. Discard the cursor, run a full resync (`GET /files/list`) and keep the stream open; live
+events continue after it.
+
+```
+event: reset
+data: {"reason":"cursor_expired"}
+```
+
 File events also carry `event_type` and `created_at` in `data`.
 
 Ephemeral vault events (no `id`, not replayed):
@@ -1720,13 +1915,22 @@ File and collab events are only delivered for paths the caller can view (renames
 path). Guests only receive member/key events about themselves. Replay is filtered the same way. On
 `access_changed` the stream recomputes the caller's access without reconnecting.
 
-**Errors**: `503` while the server is draining. A change of the caller's own role or removal closes
-the stream; reconnect to pick up the new access.
+**Errors**
+
+| Status | Code | Condition |
+|--------|------|-----------|
+| 403 | `forbidden` | Vault access denied |
+| 503 | `server_busy` | The user already has `limits.max_event_streams_per_user` streams open, or the instance reached `CORTEX_PROTECTION_MAX_SSE_TOTAL`; see `Retry-After` |
+| 503 | `unavailable` | The server is draining |
+
+A change of the caller's own role or removal closes the stream; reconnect to pick up the new
+access. A write that cannot be flushed within 30 seconds closes the stream.
 
 **Behavior**
 
-- On connect, if `Last-Event-ID` is provided, server replays all missed events before streaming live events
+- On connect, if `Last-Event-ID` is provided, server replays all missed events before streaming live events, or sends `reset` when the cursor has expired
 - Ping every 30 seconds to keep connection alive through proxies
+- In `cluster` mode, when an instance's PostgreSQL `LISTEN` connection reconnects it catches up on sync events it missed and rechecks every open stream's access
 - Client should reconnect with exponential backoff (1s, 2s, 4s, 8s, cap 60s) using `Last-Event-ID`
 - If SSE repeatedly fails, fall back to `GET /changes?since=<last_event_id>` every 30s
 
@@ -1738,7 +1942,8 @@ All collab routes are feature-gated by `collab` (`404 feature_disabled` when off
 
 ### POST /sync/v1/vaults/{vaultID}/collab/tickets
 
-Creates a short-lived ticket for the WebSocket collab endpoint, bound to user, vault and path.
+Creates a short-lived, single-use ticket for the WebSocket collab endpoint, bound to user, vault
+and path. Request a new ticket for every connection attempt.
 Requires authentication, `view` access to `file_path` and, when
 subscription enforcement is enabled, an active entitlement.
 
@@ -1771,7 +1976,7 @@ subscription enforcement is enabled, an active entitlement.
 
 ### GET /sync/v1/vaults/{vaultID}/collab
 
-WebSocket upgrade endpoint for real-time collaborative editing (Yjs CRDT). Authentication uses a ticket created by `POST /sync/v1/vaults/{vaultID}/collab/tickets` (valid for 60 seconds and reusable within that window).
+WebSocket upgrade endpoint for real-time collaborative editing (Yjs CRDT). Authentication uses a ticket created by `POST /sync/v1/vaults/{vaultID}/collab/tickets`, valid for 60 seconds and consumed by the first connection that uses it.
 
 Collab is always end-to-end encrypted. Every binary payload (`update`, `awareness`, `sync_step1`,
 `sync_step2` and the `compact` state) is an envelope
@@ -1796,8 +2001,9 @@ and never reads them.
 | Status | Condition |
 |--------|-----------|
 | 400 | Missing or invalid `path` or `vaultID` |
-| 401 | Missing, invalid or expired `ticket` |
+| 401 | Missing, invalid, expired or already used `ticket` |
 | 403 | Not a member of this vault, or no `view` access to the path |
+| 429 | `rate_limited`: the user already has `limits.max_collab_sockets_per_user` sockets open (`Retry-After: 5`) |
 | 503 | Server is draining |
 
 **Close codes** (WebSocket close frames after the upgrade)
@@ -1810,6 +2016,7 @@ and never reads them.
 | `4402` | Subscription entitlement lapsed |
 | `4403` | Access changed (role, rules or removal); reconnect to pick up the new access |
 | `4408` | Client too slow to drain frames; reconnect and resync |
+| `4429` | Client sent messages faster than `CORTEX_PROTECTION_COLLAB_MESSAGES_PER_SECOND` allows |
 
 **Message Protocol**
 
@@ -1820,6 +2027,7 @@ Default: JSON text frames (binary payloads are base64 in `data`):
   "type": "welcome | synced | sync_step1 | sync_step2 | update | awareness | compact | peer_joined | peer_left | ping | pong",
   "data": "<base64>",
   "up_to": 123,
+  "v": 1,
   "client_id": "uuid",
   "from": { "client_id": "uuid", "user_id": "uuid", "display_name": "Ana", "avatar_url": "/avatars/v1/...", "can_write": true },
   "peer": { "...same shape as from" },
@@ -1829,13 +2037,13 @@ Default: JSON text frames (binary payloads are base64 in `data`):
 
 | Type | Direction | Description |
 |------|-----------|-------------|
-| `welcome` | server → client | First frame: own `client_id`, `from` (own identity), `peers` already in the room and `up_to` (highest persisted update id) |
+| `welcome` | server → client | First frame: protocol version `v` (currently `1`), own `client_id`, `from` (own identity), `peers` already in the room and `up_to` (highest persisted update id) |
 | `synced` | server → client | Last frame of the initial backlog (`{"type":"synced"}`) |
 | `sync_step1` | bidirectional | Yjs state vector request, relayed to peers (allowed for viewers) |
 | `sync_step2` | server → client | Compacted document state sent on join. Clients must not send it: the server would persist and rebroadcast it like an `update` (dropped for viewers) |
 | `update` | bidirectional | Incremental Yjs update; writers only (dropped for viewers). Also the answer to a peer's `sync_step1`, sent by one elected responder |
 | `awareness` | bidirectional | Cursor/selection/presence payload, relayed to every peer |
-| `compact` | client → server | Compacted Y.Doc state plus `up_to`; writers only; deletes persisted updates with id <= `up_to` |
+| `compact` | client → server | Compacted Y.Doc state plus `up_to`; writers only; deletes persisted updates with id <= `up_to` (see compaction rules below) |
 | `peer_joined` / `peer_left` | server → client | Presence changes (`peer` / `client_id`) |
 | `ping` / `pong` | server ↔ client | Keepalive every 30s |
 
@@ -1869,9 +2077,11 @@ each frame per recipient.
 - Only one elected client answers a peer's `sync_step1`, with an `update`; clients never send `sync_step2`.
 - While a room is live, only one elected writer (the leader) uploads and downloads the file through file sync; the other peers adopt remote versions as their base without writing the file. See `docs/sync-client-guide.md`.
 - Deleting a file deletes its collab document (compacted state and update log) in the same transaction; renaming moves it.
-- Updates are buffered and flushed every `CORTEX_COLLAB_FLUSH_INTERVAL`, when any peer leaves and during shutdown.
+- Updates are buffered and flushed every `CORTEX_COLLAB_FLUSH_INTERVAL` (default 2s), when any peer leaves and during shutdown. Updates still buffered on the instance are read before the persisted document is loaded, so a joiner never misses an update that is being flushed.
+- Each connection has a 1024-frame outgoing buffer; a client that falls behind it is closed with `4408`.
+- Compaction rules: `up_to` is capped at the `up_to` the session received in its `welcome`, so a client can never delete updates it has not seen. A compaction whose `up_to` is not newer than the document's last compaction is ignored, so a slow client cannot overwrite a newer compacted state.
 - Peers connected to different instances see each other; frames cross instances through PostgreSQL only when a room has remote peers.
-- Tickets are HMAC-signed (stateless), valid for 60 seconds on any instance and reusable within that window.
+- Tickets are HMAC-signed and work on any instance; each instance rejects a ticket it has already accepted.
 
 ---
 
@@ -2087,7 +2297,7 @@ Tokens are single use; GET never consumes them.
 | `GET /vaults/v1/{vaultID}/keys/me` | member | Own wrapped VEK |
 | `PUT /vaults/v1/{vaultID}/keys/me` | member | `{ "encrypted_key" }` re-wrap own key |
 | `GET /vaults/v1/{vaultID}/keys/pending` | admin | Members without a key: `[{ user_id, role, public_key?, display_name, email, avatar_url? }]` |
-| `PUT /vaults/v1/{vaultID}/keys/{userID}` | admin | Grant a wrapped VEK to a member; emits `key_granted` |
+| `PUT /vaults/v1/{vaultID}/keys/{userID}` | admin | Grant a wrapped VEK to a member; emits `key_granted`. Insert-only: `409 key_exists` when the member already has a key, unless the caller outranks the member (never for the caller's own key) |
 
 `encrypted_key` is opaque to the server; clients seal the VEK to the member's X25519 public key.
 `POST /sync/v1/vaults/{vaultID}/encryption` requires admin. Every member (guests included) receives

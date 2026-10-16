@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -24,8 +26,16 @@ type Config struct {
 	Mail         MailConfig         `envPrefix:"MAIL_"`
 	Avatar       AvatarConfig       `envPrefix:"AVATAR_"`
 	Feature      FeatureConfig      `envPrefix:"FEATURE_"`
+	Jobs         JobsConfig         `envPrefix:"JOBS_"`
 	Tenancy      TenancyConfig
-	UseFakeRepos bool `env:"USE_FAKE_REPOS"`
+	Protection   ProtectionConfig `envPrefix:"PROTECTION_"`
+	Deployment   string           `env:"DEPLOYMENT" envDefault:"single"`
+	ProxyRaw     string           `env:"PROXY"`
+	Proxy        ProxyConfig      `env:"-"`
+	Bus          string           `env:"-"`
+	FeaturesRaw  []string         `env:"FEATURES" envSeparator:","`
+	UseFakeRepos bool             `env:"USE_FAKE_REPOS"`
+	Warnings     []string         `env:"-"`
 }
 
 type ServerConfig struct {
@@ -37,19 +47,20 @@ type ServerConfig struct {
 	ReadHeaderTimeout time.Duration `env:"READ_HEADER_TIMEOUT" envDefault:"5s"`
 	IdleTimeout       time.Duration `env:"IDLE_TIMEOUT" envDefault:"60s"`
 	TrustProxyHeaders bool          `env:"TRUST_PROXY_HEADERS"`
-	MaxJSONBodyBytes  int64         `env:"MAX_JSON_BODY" envDefault:"134217728"`
-	MaxUploadBytes    int64         `env:"MAX_UPLOAD_BODY" envDefault:"104857600"`
+	MaxJSONBodyBytes  int64         `env:"MAX_JSON_BODY"`
+	MaxUploadBytes    int64         `env:"MAX_UPLOAD_BODY"`
 	PublicURL         string        `env:"PUBLIC_URL"`
 	DrainDelay        time.Duration `env:"DRAIN_DELAY" envDefault:"0s"`
 }
 
 type DatabaseConfig struct {
 	URL             string        `env:"URL" envDefault:"postgres://cortex:cortex@localhost:5432/cortex_sync?sslmode=disable"`
-	MaxConns        int32         `env:"MAX_CONNS" envDefault:"25"`
-	MinConns        int32         `env:"MIN_CONNS" envDefault:"5"`
+	MaxConns        int32         `env:"MAX_CONNS"`
+	MinConns        int32         `env:"MIN_CONNS"`
 	MaxConnLifetime time.Duration `env:"MAX_CONN_LIFETIME" envDefault:"1h"`
-	MaxConnIdleTime time.Duration `env:"MAX_CONN_IDLE_TIME" envDefault:"30m"`
+	MaxConnIdleTime time.Duration `env:"MAX_CONN_IDLE_TIME"`
 	MigrationsPath  string        `env:"MIGRATIONS_PATH"`
+	MigrateOnStart  bool          `env:"MIGRATE_ON_START"`
 }
 
 type S3Config struct {
@@ -72,14 +83,14 @@ type AuthConfig struct {
 }
 
 type RateLimitConfig struct {
-	RequestsPerSecond          float64 `env:"REQUESTS_PER_SECOND" envDefault:"100"`
-	Burst                      int     `env:"BURST" envDefault:"200"`
-	SensitiveRequestsPerSecond float64 `env:"SENSITIVE_REQUESTS_PER_SECOND" envDefault:"1"`
-	SensitiveBurst             int     `env:"SENSITIVE_BURST" envDefault:"10"`
+	RequestsPerSecond          float64 `env:"REQUESTS_PER_SECOND"`
+	Burst                      int     `env:"BURST"`
+	SensitiveRequestsPerSecond float64 `env:"SENSITIVE_REQUESTS_PER_SECOND"`
+	SensitiveBurst             int     `env:"SENSITIVE_BURST"`
 }
 
 type MetricsConfig struct {
-	Enabled bool   `env:"ENABLED" envDefault:"true"`
+	Enabled bool   `env:"ENABLED"`
 	Path    string `env:"PATH" envDefault:"/metrics"`
 }
 
@@ -91,14 +102,14 @@ type CORSConfig struct {
 type SyncConfig struct {
 	MaxDeltasBeforeSnapshot int           `env:"MAX_DELTAS_BEFORE_SNAPSHOT" envDefault:"10"`
 	MaxDeltaSizeRatio       float64       `env:"MAX_DELTA_SIZE_RATIO" envDefault:"0.5"`
-	MaxFileSize             int64         `env:"MAX_FILE_SIZE" envDefault:"104857600"`
+	MaxFileSize             int64         `env:"MAX_FILE_SIZE"`
 	MaxSnapshotsPerFile     int           `env:"MAX_SNAPSHOTS_PER_FILE" envDefault:"50"`
 	EventRetention          time.Duration `env:"EVENT_RETENTION" envDefault:"720h"`
 }
 
 type CollabConfig struct {
 	MaxPeersPerRoom int           `env:"MAX_PEERS_PER_ROOM" envDefault:"10"`
-	FlushInterval   time.Duration `env:"FLUSH_INTERVAL" envDefault:"10s"`
+	FlushInterval   time.Duration `env:"FLUSH_INTERVAL" envDefault:"2s"`
 	MaxBufBytes     int           `env:"MAX_BUF_BYTES" envDefault:"4194304"`
 }
 
@@ -118,14 +129,16 @@ type DevOpsConfig struct {
 }
 
 type MailConfig struct {
-	Driver   string        `env:"DRIVER" envDefault:"none"`
-	Host     string        `env:"HOST"`
-	Port     int           `env:"PORT" envDefault:"587"`
-	Username string        `env:"USERNAME"`
-	Password string        `env:"PASSWORD"`
-	From     string        `env:"FROM" envDefault:"Cortex <no-reply@localhost>"`
-	TLSMode  string        `env:"TLS_MODE" envDefault:"starttls"`
-	Timeout  time.Duration `env:"TIMEOUT" envDefault:"15s"`
+	Driver       string        `env:"DRIVER" envDefault:"none"`
+	ResendAPIKey string        `env:"RESEND_API_KEY"`
+	ResendURL    string        `env:"RESEND_URL" envDefault:"https://api.resend.com/emails"`
+	Host         string        `env:"HOST"`
+	Port         int           `env:"PORT" envDefault:"587"`
+	Username     string        `env:"USERNAME"`
+	Password     string        `env:"PASSWORD"`
+	From         string        `env:"FROM" envDefault:"Cortex <no-reply@localhost>"`
+	TLSMode      string        `env:"TLS_MODE" envDefault:"starttls"`
+	Timeout      time.Duration `env:"TIMEOUT" envDefault:"15s"`
 }
 
 type AvatarConfig struct {
@@ -134,19 +147,29 @@ type AvatarConfig struct {
 }
 
 type FeatureConfig struct {
-	Collab               bool   `env:"COLLAB" envDefault:"true"`
-	Avatars              bool   `env:"AVATARS" envDefault:"true"`
-	Guests               bool   `env:"GUESTS" envDefault:"true"`
-	PublicLinks          bool   `env:"PUBLIC_LINKS" envDefault:"true"`
+	Collab               bool   `env:"COLLAB"`
+	Avatars              bool   `env:"AVATARS"`
+	Guests               bool   `env:"GUESTS"`
+	PublicLinks          bool   `env:"PUBLIC_LINKS"`
 	EmailVerificationRaw string `env:"EMAIL_VERIFICATION" envDefault:"auto"`
 	PasswordResetRaw     string `env:"PASSWORD_RESET" envDefault:"auto"`
 	EmailVerification    bool   `env:"-"`
 	PasswordReset        bool   `env:"-"`
 }
 
+type JobsConfig struct {
+	SweepInterval time.Duration `env:"SWEEP_INTERVAL" envDefault:"1h"`
+}
+
 type TenancyConfig struct {
-	Mode          string `env:"TENANCY_MODE" envDefault:"single"`
-	VaultCreation string `env:"VAULT_CREATION" envDefault:"everyone"`
+	Mode                 string `env:"TENANCY_MODE" envDefault:"single"`
+	VaultCreation        string `env:"VAULT_CREATION" envDefault:"everyone"`
+	DefaultVaultQuotaRaw string `env:"TENANCY_DEFAULT_VAULT_QUOTA"`
+	DefaultVaultQuota    int64  `env:"-"`
+	MaxVaultsPerUser     int    `env:"TENANCY_MAX_VAULTS_PER_USER"`
+	MaxDevicesPerUser    int    `env:"TENANCY_MAX_DEVICES_PER_USER"`
+	MaxPendingInvites    int    `env:"TENANCY_MAX_PENDING_INVITES_PER_VAULT"`
+	MaxSharesPerVault    int    `env:"TENANCY_MAX_SHARES_PER_VAULT"`
 }
 
 func Load() (*Config, error) {
@@ -162,6 +185,9 @@ func Load() (*Config, error) {
 	cfg.S3 = storage
 
 	normalize(cfg)
+	if err := applyProfiles(cfg, os.LookupEnv); err != nil {
+		return nil, err
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -222,7 +248,7 @@ func resolveMailFeature(name string, raw string, mailEnabled bool) (bool, error)
 		return false, nil
 	case "true", "1", "on":
 		if !mailEnabled {
-			return false, fmt.Errorf("%s requires CORTEX_MAIL_DRIVER to be log or smtp", name)
+			return false, fmt.Errorf("%s requires CORTEX_MAIL_DRIVER to be log, smtp, or resend", name)
 		}
 		return true, nil
 	default:
@@ -254,6 +280,10 @@ func (cfg *Config) Validate() error {
 	}
 	switch cfg.Mail.Driver {
 	case "none", "log":
+	case "resend":
+		if strings.TrimSpace(cfg.Mail.ResendAPIKey) == "" || cfg.Mail.From == "" {
+			return fmt.Errorf("resend mail driver requires CORTEX_MAIL_RESEND_API_KEY and CORTEX_MAIL_FROM")
+		}
 	case "smtp":
 		if cfg.Mail.Host == "" || cfg.Mail.Port <= 0 || cfg.Mail.From == "" {
 			return fmt.Errorf("smtp mail driver requires host, port and from")
@@ -262,10 +292,13 @@ func (cfg *Config) Validate() error {
 			return fmt.Errorf("mail tls mode must be starttls, tls, or none")
 		}
 	default:
-		return fmt.Errorf("mail driver must be none, log, or smtp")
+		return fmt.Errorf("mail driver must be none, log, smtp, or resend")
 	}
 	if err := cfg.resolveFeatures(); err != nil {
 		return err
+	}
+	if cfg.Jobs.SweepInterval < time.Second {
+		return fmt.Errorf("CORTEX_JOBS_SWEEP_INTERVAL must be at least 1s")
 	}
 	if cfg.Avatar.MaxBytes <= 0 || cfg.Avatar.Size < 32 || cfg.Avatar.Size > 1024 {
 		return fmt.Errorf("avatar max bytes must be positive and size between 32 and 1024")
@@ -305,10 +338,13 @@ func (cfg *Config) Validate() error {
 			return fmt.Errorf("r2 bucket creation must be disabled; create the bucket in Cloudflare first")
 		}
 	}
+	if err := cfg.validateSecret(); err != nil {
+		return err
+	}
+	if cfg.CORS.AllowCredentials && slices.Contains(cfg.CORS.AllowedOrigins, "*") {
+		return fmt.Errorf("CORTEX_CORS_ALLOW_CREDENTIALS requires explicit CORTEX_CORS_ALLOWED_ORIGINS instead of *")
+	}
 	if cfg.Server.Environment == "production" {
-		if cfg.Auth.AccessTokenSecret == "" || cfg.Auth.AccessTokenSecret == "change-me-in-production" || len(cfg.Auth.AccessTokenSecret) < 32 {
-			return fmt.Errorf("production auth access token secret must be at least 32 characters and not use the default value")
-		}
 		if cfg.Database.URL == "postgres://cortex:cortex@localhost:5432/cortex_sync?sslmode=disable" {
 			return fmt.Errorf("production database url must not use the development default")
 		}
@@ -335,4 +371,32 @@ func (cfg *Config) Validate() error {
 	}
 
 	return nil
+}
+
+var knownSecrets = []string{"change-me-in-production", "dev-only-change-this-token-secret-32"}
+
+func (cfg *Config) validateSecret() error {
+	secret := cfg.Auth.AccessTokenSecret
+	weak := len(secret) < 32 || slices.Contains(knownSecrets, secret)
+	if !weak {
+		return nil
+	}
+	if cfg.Server.Environment != "production" && (cfg.UseFakeRepos || isLocalURL(cfg.Server.PublicURL)) {
+		cfg.Warnings = append(cfg.Warnings, "CORTEX_AUTH_ACCESS_TOKEN_SECRET is a known or short value; generate one with `openssl rand -hex 32` before exposing this server")
+		return nil
+	}
+	return fmt.Errorf("CORTEX_AUTH_ACCESS_TOKEN_SECRET must be at least 32 random characters and not a published default (generate one with `openssl rand -hex 32`)")
+}
+
+func isLocalURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	switch parsed.Hostname() {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
 }

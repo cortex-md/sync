@@ -77,12 +77,13 @@ func (r *UserTokenRepository) DeleteExpired(_ context.Context) (int64, error) {
 type EmailOutboxRepository struct {
 	mu     sync.Mutex
 	emails []*domain.OutboxEmail
-	sent   map[int64]bool
+	sent   map[int64]time.Time
+	dead   map[int64]time.Time
 	nextID int64
 }
 
 func NewEmailOutboxRepository() *EmailOutboxRepository {
-	return &EmailOutboxRepository{sent: make(map[int64]bool), nextID: 1}
+	return &EmailOutboxRepository{sent: make(map[int64]time.Time), dead: make(map[int64]time.Time), nextID: 1}
 }
 
 func (r *EmailOutboxRepository) Enqueue(_ context.Context, email *domain.OutboxEmail) error {
@@ -97,15 +98,39 @@ func (r *EmailOutboxRepository) Enqueue(_ context.Context, email *domain.OutboxE
 	return nil
 }
 
-func (r *EmailOutboxRepository) ClaimDue(_ context.Context, limit int) ([]domain.OutboxEmail, error) {
+func (r *EmailOutboxRepository) claimable(e *domain.OutboxEmail, now time.Time) bool {
+	_, sent := r.sent[e.ID]
+	_, dead := r.dead[e.ID]
+	return !sent && !dead && !e.NextAttemptAt.After(now)
+}
+
+func (r *EmailOutboxRepository) Claim(_ context.Context, id int64, lease time.Duration) (*domain.OutboxEmail, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	now := time.Now()
+	for _, e := range r.emails {
+		if e.ID == id && r.claimable(e, now) {
+			e.Attempts++
+			e.NextAttemptAt = now.Add(lease)
+			claimed := *e
+			return &claimed, nil
+		}
+	}
+	return nil, domain.ErrNotFound
+}
+
+func (r *EmailOutboxRepository) ClaimDue(_ context.Context, limit int, lease time.Duration) ([]domain.OutboxEmail, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
 	var result []domain.OutboxEmail
 	for _, e := range r.emails {
 		if len(result) >= limit {
 			break
 		}
-		if !r.sent[e.ID] && !e.NextAttemptAt.After(time.Now()) {
+		if r.claimable(e, now) {
+			e.Attempts++
+			e.NextAttemptAt = now.Add(lease)
 			result = append(result, *e)
 		}
 	}
@@ -115,20 +140,46 @@ func (r *EmailOutboxRepository) ClaimDue(_ context.Context, limit int) ([]domain
 func (r *EmailOutboxRepository) MarkSent(_ context.Context, id int64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.sent[id] = true
+	r.sent[id] = time.Now()
 	return nil
 }
 
-func (r *EmailOutboxRepository) MarkFailed(_ context.Context, id int64, _ string, nextAttemptAt time.Time) error {
+func (r *EmailOutboxRepository) MarkRetry(_ context.Context, id int64, _ string, nextAttemptAt time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, e := range r.emails {
 		if e.ID == id {
-			e.Attempts++
 			e.NextAttemptAt = nextAttemptAt
 		}
 	}
 	return nil
+}
+
+func (r *EmailOutboxRepository) MarkDead(_ context.Context, id int64, _ string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.dead[id] = time.Now()
+	return nil
+}
+
+func (r *EmailOutboxRepository) DeleteFinished(_ context.Context, sentBefore, deadBefore time.Time) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var count int64
+	kept := r.emails[:0]
+	for _, e := range r.emails {
+		sentAt, sent := r.sent[e.ID]
+		deadAt, dead := r.dead[e.ID]
+		if (sent && sentAt.Before(sentBefore)) || (dead && deadAt.Before(deadBefore)) {
+			delete(r.sent, e.ID)
+			delete(r.dead, e.ID)
+			count++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	r.emails = kept
+	return count, nil
 }
 
 func (r *EmailOutboxRepository) Pending() []domain.OutboxEmail {
@@ -136,11 +187,23 @@ func (r *EmailOutboxRepository) Pending() []domain.OutboxEmail {
 	defer r.mu.Unlock()
 	var result []domain.OutboxEmail
 	for _, e := range r.emails {
-		if !r.sent[e.ID] {
+		_, sent := r.sent[e.ID]
+		_, dead := r.dead[e.ID]
+		if !sent && !dead {
 			result = append(result, *e)
 		}
 	}
 	return result
+}
+
+func (r *EmailOutboxRepository) Sent() []int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ids := make([]int64, 0, len(r.sent))
+	for id := range r.sent {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 type Locker struct{}

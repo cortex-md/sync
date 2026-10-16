@@ -28,3 +28,8 @@ type RefreshTokenRepository interface {
 	RevokeAllByUserExceptDevice(ctx context.Context, userID uuid.UUID, deviceID uuid.UUID) error
 	DeleteExpired(ctx context.Context) (int64, error)
 }
+
+type TokenRevoker interface {
+	RevokeDevice(ctx context.Context, deviceID uuid.UUID)
+	RevokeUser(ctx context.Context, userID uuid.UUID)
+}

@@ -3,6 +3,7 @@ package vault
 import (
 	"bytes"
 	"context"
+	"errors"
 	"time"
 
 	"github.com/cortexnotes/cortex-sync/internal/platform/authz"
@@ -82,11 +83,21 @@ func (uc *KeyService) Grant(ctx context.Context, input GrantVaultKeyInput) (*Vau
 		return nil, domain.ErrInvalidInput
 	}
 
-	if _, err := uc.authz.Require(ctx, input.VaultID, input.ActorID, domain.PermKeyGrant); err != nil {
+	actor, err := uc.authz.Require(ctx, input.VaultID, input.ActorID, domain.PermKeyGrant)
+	if err != nil {
 		return nil, err
 	}
 
-	if _, err := uc.members.GetByVaultAndUser(ctx, input.VaultID, input.UserID); err != nil {
+	target, err := uc.members.GetByVaultAndUser(ctx, input.VaultID, input.UserID)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := uc.keys.GetByVaultAndUser(ctx, input.VaultID, input.UserID); err == nil {
+		if input.UserID == input.ActorID || !actor.Role.Outranks(target.Role) {
+			return nil, domain.ErrKeyExists
+		}
+	} else if !errors.Is(err, domain.ErrNotFound) {
 		return nil, err
 	}
 

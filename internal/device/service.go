@@ -8,6 +8,7 @@ import (
 )
 
 type Service struct {
+	revoker       TokenRevoker
 	devices       DeviceRepository
 	refreshTokens RefreshTokenRepository
 }
@@ -15,12 +16,14 @@ type Service struct {
 type Deps struct {
 	Devices       DeviceRepository
 	RefreshTokens RefreshTokenRepository
+	Revoker       TokenRevoker
 }
 
 func NewService(d Deps) *Service {
 	return &Service{
 		devices:       d.Devices,
 		refreshTokens: d.RefreshTokens,
+		revoker:       d.Revoker,
 	}
 }
 
@@ -103,7 +106,13 @@ func (uc *Service) Revoke(ctx context.Context, input RevokeDeviceInput) error {
 		return err
 	}
 
-	return uc.refreshTokens.RevokeAllByDeviceID(ctx, device.ID)
+	if err := uc.refreshTokens.RevokeAllByDeviceID(ctx, device.ID); err != nil {
+		return err
+	}
+	if uc.revoker != nil {
+		uc.revoker.RevokeDevice(ctx, device.ID)
+	}
+	return nil
 }
 
 type UpdateDeviceInput struct {

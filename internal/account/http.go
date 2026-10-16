@@ -544,17 +544,20 @@ func handleAccountError(w http.ResponseWriter, err error) {
 	case errors.Is(err, domain.ErrKeysNotSetUp):
 		httpx.WriteErrorWithCode(w, http.StatusConflict, "account keys are not set up", "keys_not_set_up")
 	case errors.Is(err, domain.ErrInvalidInput):
-		httpx.WriteError(w, http.StatusBadRequest, "invalid input")
+		httpx.WriteErrorWithCode(w, http.StatusBadRequest, "invalid input", "invalid_input")
 	case errors.Is(err, domain.ErrInvalidCredentials):
 		httpx.WriteErrorWithCode(w, http.StatusUnauthorized, "invalid credentials", "invalid_credentials")
 	case errors.Is(err, domain.ErrAlreadyExists):
 		httpx.WriteErrorWithCode(w, http.StatusConflict, "email already in use", "email_taken")
 	case errors.Is(err, domain.ErrNotFound):
-		httpx.WriteError(w, http.StatusNotFound, "not found")
+		httpx.WriteErrorWithCode(w, http.StatusNotFound, "not found", "not_found")
 	case errors.Is(err, domain.ErrFileTooLarge):
-		httpx.WriteError(w, http.StatusRequestEntityTooLarge, "file too large")
+		httpx.WriteErrorWithCode(w, http.StatusRequestEntityTooLarge, "file too large", "file_too_large")
 	default:
+		if httpx.WriteDomainError(w, err) {
+			return
+		}
 		log.Error().Err(err).Msg("account request failed")
-		httpx.WriteError(w, http.StatusInternalServerError, "internal server error")
+		httpx.WriteInternalError(w)
 	}
 }

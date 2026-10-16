@@ -328,6 +328,7 @@ func (r *RefreshTokenRepository) GetByTokenHash(ctx context.Context, tokenHash s
 		FamilyID:  t.FamilyID,
 		ExpiresAt: t.ExpiresAt,
 		Revoked:   t.Revoked,
+		RotatedAt: t.RotatedAt,
 		CreatedAt: t.CreatedAt,
 	}, nil
 }
@@ -358,8 +359,9 @@ func (r *RefreshTokenRepository) RevokeAllByUserExceptDevice(ctx context.Context
 }
 
 func (r *RefreshTokenRepository) DeleteExpired(ctx context.Context) (int64, error) {
-	n, err := r.q(ctx).DeleteExpiredRefreshTokens(ctx)
-	return n, mapError(err)
+	return deleteInBatches(ctx, func(limit int32) (int64, error) {
+		return r.q(ctx).DeleteExpiredRefreshTokens(ctx, limit)
+	})
 }
 
 func (r *DeviceRepository) ListActiveByUsers(ctx context.Context, userIDs []uuid.UUID) ([]domain.Device, error) {

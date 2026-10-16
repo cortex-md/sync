@@ -19,8 +19,10 @@ type DeviceRepository interface {
 }
 
 type PasswordHasher interface {
-	Hash(password string) (string, error)
+	HashFor(kdfVersion int, password string) (string, error)
 	Compare(hash string, password string) error
+	NeedsRehash(hash string, kdfVersion int) bool
+	DummyHash() string
 }
 
 type RefreshTokenRepository interface {
@@ -51,4 +53,9 @@ type UserRepository interface {
 	UpdatePublicKey(ctx context.Context, id uuid.UUID, publicKey []byte) error
 	Update(ctx context.Context, user *domain.User) error
 	ListByIDs(ctx context.Context, ids []uuid.UUID) ([]domain.User, error)
+}
+
+type TokenRevoker interface {
+	RevokeDevice(ctx context.Context, deviceID uuid.UUID)
+	RevokeUser(ctx context.Context, userID uuid.UUID)
 }

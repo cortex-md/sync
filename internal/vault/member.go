@@ -218,6 +218,7 @@ func (uc *MemberService) remove(ctx context.Context, vaultID, userID uuid.UUID) 
 }
 
 func (uc *MemberService) accessChanged(ctx context.Context, vaultID, userID uuid.UUID) {
+	ctx = context.WithoutCancel(ctx)
 	uc.authz.InvalidateVault(vaultID)
 	bus.PublishAccessChanged(ctx, uc.bus, vaultID, userID)
 	bus.PublishVaultAccessChanged(ctx, uc.bus, vaultID)

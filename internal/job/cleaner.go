@@ -90,3 +90,19 @@ func (c *Cleaner) clean(ctx context.Context) {
 		}
 	}
 }
+
+func AtMostEvery(interval time.Duration, task CleanupTask) CleanupTask {
+	var last time.Time
+	run := task.Run
+	task.Run = func(ctx context.Context) (int64, error) {
+		if !last.IsZero() && time.Since(last) < interval {
+			return 0, nil
+		}
+		n, err := run(ctx)
+		if err == nil {
+			last = time.Now()
+		}
+		return n, err
+	}
+	return task
+}

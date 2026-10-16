@@ -3,7 +3,6 @@ package account
 import (
 	"context"
 	"io"
-	"time"
 
 	"github.com/cortexnotes/cortex-sync/internal/domain"
 	"github.com/google/uuid"
@@ -23,13 +22,10 @@ type BlobStorage interface {
 
 type EmailOutboxRepository interface {
 	Enqueue(ctx context.Context, email *domain.OutboxEmail) error
-	ClaimDue(ctx context.Context, limit int) ([]domain.OutboxEmail, error)
-	MarkSent(ctx context.Context, id int64) error
-	MarkFailed(ctx context.Context, id int64, lastError string, nextAttemptAt time.Time) error
 }
 
 type PasswordHasher interface {
-	Hash(password string) (string, error)
+	HashFor(kdfVersion int, password string) (string, error)
 	Compare(hash string, password string) error
 }
 
@@ -77,4 +73,10 @@ type MembershipRepository interface {
 
 type VaultKeyRepository interface {
 	DeleteForUser(ctx context.Context, userID uuid.UUID) error
+}
+
+type TokenRevoker interface {
+	RevokeDevice(ctx context.Context, deviceID uuid.UUID)
+	RevokeUser(ctx context.Context, userID uuid.UUID)
+	RevokeUserExcept(ctx context.Context, userID uuid.UUID, keepDevice uuid.UUID)
 }

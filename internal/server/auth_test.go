@@ -20,8 +20,9 @@ import (
 )
 
 type testHarness struct {
-	router   *chi.Mux
-	tokenGen server.TokenGenerator
+	router        *chi.Mux
+	tokenGen      server.TokenGenerator
+	refreshTokens *fake.RefreshTokenRepository
 }
 
 func newTestHarness() *testHarness {
@@ -45,7 +46,7 @@ func newTestHarness() *testHarness {
 		r.Post("/auth/v1/logout", authHandler.Logout)
 	})
 
-	return &testHarness{router: r, tokenGen: tokenGen}
+	return &testHarness{router: r, tokenGen: tokenGen, refreshTokens: refreshTokenRepo}
 }
 
 func doRequest(h *testHarness, method, path string, body any) *httptest.ResponseRecorder {
@@ -198,6 +199,7 @@ func TestAuthHandler_Refresh_ReuseDetection(t *testing.T) {
 		"refresh_token": refreshToken,
 	})
 	assert.Equal(t, http.StatusOK, rec.Code)
+	h.refreshTokens.AgeRotations(time.Minute)
 
 	rec = doRequest(h, "POST", "/auth/v1/token/refresh", map[string]string{
 		"refresh_token": refreshToken,

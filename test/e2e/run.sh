@@ -20,6 +20,8 @@ cleanup() {
 trap cleanup EXIT
 
 export CORTEX_SERVER_ENV=production
+export CORTEX_DEPLOYMENT=cluster
+export CORTEX_PROTECTION=off
 export CORTEX_DATABASE_URL="${CORTEX_E2E_DATABASE_URL:-postgres://cortex:cortex@127.0.0.1:5432/cortex_sync?sslmode=disable}"
 export CORTEX_STORAGE_BACKEND=local
 export CORTEX_STORAGE_ENDPOINT="${CORTEX_E2E_S3_ENDPOINT:-127.0.0.1:9000}"
@@ -33,12 +35,14 @@ export CORTEX_RATE_LIMIT_SENSITIVE_REQUESTS_PER_SECOND=100
 export CORTEX_RATE_LIMIT_SENSITIVE_BURST=100
 export CORTEX_SERVER_DRAIN_DELAY=2s
 export CORTEX_COLLAB_FLUSH_INTERVAL=1s
+export CORTEX_JOBS_SWEEP_INTERVAL=2s
 
 port_a=${CORTEX_E2E_PORT:-8080}
 port_b=$((port_a + 1))
 port_minimal=$((port_a + 2))
+port_single=$((port_a + 3))
 
-for port in "$port_a" "$port_b" "$port_minimal"; do
+for port in "$port_a" "$port_b" "$port_minimal" "$port_single"; do
 	if curl -sf "http://127.0.0.1:$port/health" >/dev/null; then
 		echo "port $port is already serving; stop the running sync server first"
 		exit 1
@@ -60,11 +64,10 @@ start() {
 smtp="CORTEX_MAIL_DRIVER=smtp CORTEX_MAIL_HOST=127.0.0.1 CORTEX_MAIL_PORT=1025 CORTEX_MAIL_TLS_MODE=none"
 start a "$port_a" $smtp
 start b "$port_b" $smtp
-start minimal "$port_minimal" CORTEX_MAIL_DRIVER=none CORTEX_TENANCY_MODE=multi \
-	CORTEX_FEATURE_COLLAB=false CORTEX_FEATURE_AVATARS=false CORTEX_FEATURE_GUESTS=false \
-	CORTEX_FEATURE_PUBLIC_LINKS=false
+start minimal "$port_minimal" CORTEX_MAIL_DRIVER=none CORTEX_TENANCY_MODE=multi CORTEX_FEATURES=
+start single "$port_single" CORTEX_DEPLOYMENT=single CORTEX_DATABASE_MIGRATE_ON_START=true $smtp
 
-for port in "$port_a" "$port_b" "$port_minimal"; do
+for port in "$port_a" "$port_b" "$port_minimal" "$port_single"; do
 	tries=0
 	until curl -sf "http://127.0.0.1:$port/ready" >/dev/null; do
 		tries=$((tries + 1))
@@ -79,3 +82,9 @@ CORTEX_E2E_URL_A="http://127.0.0.1:$port_a" \
 	CORTEX_E2E_URL_MINIMAL="http://127.0.0.1:$port_minimal" \
 	CORTEX_E2E_DRAIN_B="kill $(cat "$work/b.pid")" \
 	go test -tags e2e ./test/e2e/... -count=1 -race -v "$@"
+
+single="http://127.0.0.1:$port_single"
+CORTEX_E2E_URL_A="$single" \
+	CORTEX_E2E_URL_B="$single" \
+	CORTEX_E2E_URL_MINIMAL="http://127.0.0.1:$port_minimal" \
+	go test -tags e2e ./test/e2e/... -count=1 -race -v -run 'TestSyncContracts|TestGuestScope|TestGroupsAndPathAccess|TestKeysPreloginAndReset|TestNoteShares' "$@"

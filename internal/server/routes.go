@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/cortexnotes/cortex-sync/internal/account"
+	"github.com/cortexnotes/cortex-sync/internal/apidocs"
 	"github.com/cortexnotes/cortex-sync/internal/auth"
 	"github.com/cortexnotes/cortex-sync/internal/device"
 	"github.com/cortexnotes/cortex-sync/internal/file"
@@ -88,6 +89,8 @@ func newRouter(cfg *config.Config, features feature.Set, h routes) http.Handler 
 	if h.vaultEntitlement != nil {
 		vaultEntitled = h.vaultEntitlement
 	}
+
+	r.With(public).Group(apidocs.Routes)
 
 	r.Get("/health", HealthCheck)
 	r.Get("/ready", h.readiness.Check)

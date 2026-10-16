@@ -1,5 +1,8 @@
 # Cortex Sync API Reference
 
+Interactive reference: `GET /docs` (Swagger UI) and the OpenAPI 3.1 contract at `GET /docs/openapi.yaml`
+(source: `internal/apidocs/openapi.yaml`).
+
 Base URL: `http://localhost:8080`
 
 ## Common

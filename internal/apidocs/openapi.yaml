@@ -1,0 +1,6383 @@
+openapi: 3.1.0
+info:
+  title: Cortex Sync API
+  version: '1'
+  description: |
+    HTTP API of Cortex Sync, the self-hostable sync server for Cortex vaults.
+
+    **End-to-end encryption.** Note content, deltas, collab updates, shared notes and team templates are encrypted on
+    the client. The server only stores and relays opaque ciphertext and wrapped keys (vault keys sealed to each
+    member's X25519 public key, the password-wrapped private key); it never sees plaintext or anything that can
+    unwrap it.
+
+    **Authentication.** Authenticated routes need `Authorization: Bearer <access_token>` (an HS256 JWT from
+    `POST /auth/v1/login` or `/auth/v1/token/refresh`) and the `X-Device-ID: <uuid>` header of the device the token was
+    issued to. A missing or invalid `X-Device-ID` is `400 invalid_input`; a different one is `401 device_mismatch`.
+    Public routes (health, capabilities, auth, email links, invite and share pages) need neither. The collab
+    WebSocket authenticates with a short-lived `ticket` query parameter instead.
+
+    **Errors.** Every error, including rate limits, body limits and panics, uses the envelope
+    `{"error": "message", "code": "machine_code", "details": ...}`. Branch on `code`, never on `error`. Without a
+    specific code the code follows the status: `400 invalid_input`, `401 unauthorized`, `402 subscription_required`,
+    `403 forbidden`, `404 not_found`, `409 already_exists`, `410 gone`, `413 file_too_large`, `429 rate_limited`,
+    `503 unavailable`, other `5xx` `internal_error`.
+
+    **Retry-After.** `429` and `503` responses caused by a limit carry `Retry-After` (seconds) when the server knows how
+    long to wait. Clients should wait at least that long before retrying.
+
+    **Optional features.** Collab, avatars, public links, email verification and password reset can be switched off
+    per server (see `GET /meta/v1/capabilities`). A route whose feature is disabled answers
+    `404 {"code": "feature_disabled"}`. Subscription routes and the Stripe webhook only exist when subscriptions are
+    enabled.
+servers:
+- url: /
+tags:
+- name: Health
+- name: Meta
+- name: Auth
+- name: Account
+- name: Devices
+- name: Subscription
+- name: Vaults
+- name: Members
+- name: Access
+- name: Invites
+- name: Keys
+- name: Files
+- name: Changes
+- name: Realtime
+- name: Collab
+- name: Shares
+- name: Templates
+- name: Pages
+- name: Webhooks
+paths:
+  /account/v1/email/confirm-change:
+    get:
+      operationId: confirmEmailChangePage
+      tags:
+      - Pages
+      summary: Email change confirmation page
+      description: |
+        HTML page with a confirm button posting to `POST /account/v1/email/confirm-change`. Feature-gated by `email_verification`.
+      parameters:
+      - name: token
+        in: query
+        required: true
+        description: Single-use token from the email link.
+        schema:
+          type: string
+      responses:
+        '200':
+          description: HTML confirmation page
+          content:
+            text/html:
+              schema:
+                type: string
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '410':
+          description: 'HTML page: link expired or already used'
+          content:
+            text/html:
+              schema:
+                type: string
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+    post:
+      operationId: confirmEmailChange
+      tags:
+      - Account
+      summary: Confirm an email change
+      description: |
+        Form post (HTML response) or JSON `{ "token" }` (`200 {"status":"ok"}`). Feature-gated by `email_verification`.
+
+        Error codes (JSON): `400 invalid_input`, `404 not_found`, `404 feature_disabled`, `409 email_taken` (the address
+        was taken meanwhile). Form posts answer `409`/`410` with HTML pages.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                token:
+                  type: string
+              required:
+              - token
+      responses:
+        '200':
+          description: Email changed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+            text/html:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '409':
+          description: Address taken meanwhile (`email_taken` JSON, or HTML page)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+            text/html:
+              schema:
+                type: string
+        '410':
+          description: 'HTML page: token expired (form posts)'
+          content:
+            text/html:
+              schema:
+                type: string
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+  /account/v1/email/verify:
+    get:
+      operationId: verifyEmailPage
+      tags:
+      - Pages
+      summary: Email verification page
+      description: |
+        HTML page with a confirm button that posts the token to `POST /account/v1/email/verify`. GET never consumes the token. Feature-gated by `email_verification` (`404 feature_disabled`, JSON).
+      parameters:
+      - name: token
+        in: query
+        required: true
+        description: Single-use token from the email link.
+        schema:
+          type: string
+      responses:
+        '200':
+          description: HTML confirmation page
+          content:
+            text/html:
+              schema:
+                type: string
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '410':
+          description: 'HTML page: link expired or already used'
+          content:
+            text/html:
+              schema:
+                type: string
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+    post:
+      operationId: verifyEmail
+      tags:
+      - Account
+      summary: Confirm an email address
+      description: |
+        Accepts a form post from the HTML page (answers with an HTML page) or JSON `{ "token" }` (answers
+        `200 {"status":"ok"}`). Feature-gated by `email_verification`.
+
+        Error codes (JSON): `400 invalid_input`, `404 not_found` (unknown or expired token), `404 feature_disabled`.
+        Form posts answer `410` with an HTML page for expired tokens.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                token:
+                  type: string
+              required:
+              - token
+      responses:
+        '200':
+          description: Verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+            text/html:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '410':
+          description: 'HTML page: token expired (form posts)'
+          content:
+            text/html:
+              schema:
+                type: string
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+  /account/v1/me/:
+    get:
+      operationId: getMe
+      tags:
+      - Account
+      summary: Get the current account
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    patch:
+      operationId: updateMe
+      tags:
+      - Account
+      summary: Update display name or locale
+      description: |
+        Both fields are optional; `locale` is `en` or `pt-BR`.
+
+        Error codes: `400 invalid_input`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProfileRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /account/v1/me/avatar:
+    put:
+      operationId: setAvatar
+      tags:
+      - Account
+      summary: Upload an avatar
+      description: |
+        Raw image body (JPEG, PNG, GIF or WebP, up to `limits.avatar_max_bytes`). The image is center-cropped, resized
+        and re-encoded as JPEG with metadata stripped. Feature-gated by `avatars`.
+
+        Error codes: `400 invalid_input` (not an image), `404 feature_disabled`, `413 file_too_large`.
+      requestBody:
+        required: true
+        content:
+          image/jpeg:
+            schema:
+              type: string
+              format: binary
+          image/png:
+            schema:
+              type: string
+              format: binary
+          image/gif:
+            schema:
+              type: string
+              format: binary
+          image/webp:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    delete:
+      operationId: deleteAvatar
+      tags:
+      - Account
+      summary: Remove the avatar
+      description: |
+        Feature-gated by `avatars` (`404 feature_disabled`).
+      responses:
+        '204':
+          description: No Content
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /account/v1/me/email:
+    post:
+      operationId: requestEmailChange
+      tags:
+      - Account
+      summary: Change the email address
+      description: |
+        `password` is the auth key for `kdf_version: 1` accounts. With email verification enabled the server sends a
+        confirmation link and answers `202 {"status":"confirmation_sent"}`; otherwise the email changes immediately
+        (`200 {"status":"changed"}`) and is marked unverified.
+
+        Error codes: `400 invalid_input`, `401 invalid_credentials`, `409 email_taken`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RequestEmailChangeRequest'
+      responses:
+        '200':
+          description: 'Email changed (`status: changed`)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '202':
+          description: 'Confirmation sent (`status: confirmation_sent`)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /account/v1/me/email/verification:
+    post:
+      operationId: sendEmailVerification
+      tags:
+      - Account
+      summary: Resend the verification email
+      description: |
+        Feature-gated by `email_verification` (`404 feature_disabled`).
+      responses:
+        '202':
+          description: 'Sent (`status: verification_sent`)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /account/v1/me/keys:
+    get:
+      operationId: getAccountKeys
+      tags:
+      - Account
+      summary: Get the account identity key material
+      description: |
+        Returns the KDF salt, public key and password-wrapped private key (all opaque to the server).
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountKeys'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    put:
+      operationId: setupAccountKeys
+      tags:
+      - Account
+      summary: Set up or replace the account identity
+      description: |
+        Also upgrades `kdf_version: 0` accounts. Sets the password hash from `password` and `kdf_version: 1`; sessions
+        stay valid. When `public_key` differs from the stored one, the user's vault keys are deleted and
+        `member_key_changed` is emitted in every vault; the recovery wrap is cleared unless a new one is sent.
+        Rate limited as a sensitive route.
+
+        Error codes: `400 invalid_input`, `401 invalid_credentials`, `503 server_busy`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetupKeysRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountKeys'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /account/v1/me/password:
+    put:
+      operationId: changePassword
+      tags:
+      - Account
+      summary: Change the password
+      description: |
+        For `kdf_version: 1` accounts both passwords are auth keys and `kdf_salt` plus the re-wrapped
+        `encrypted_private_key` are required; legacy accounts must not send them. Revokes the sessions of every other
+        device and emails a notice.
+
+        Error codes: `400 invalid_input`, `401 invalid_credentials`, `503 server_busy`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+      responses:
+        '204':
+          description: No Content
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /account/v1/me/public-key:
+    put:
+      operationId: setPublicKey
+      tags:
+      - Keys
+      summary: Set the public key (legacy accounts)
+      description: |
+        Legacy accounts only. Error codes: `400 invalid_input`, `409` when a `kdf_version: 1` account sends a different key (use `PUT /account/v1/me/keys`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublicKeyRequest'
+      responses:
+        '204':
+          description: No Content
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /account/v1/me/recovery:
+    put:
+      operationId: setRecoveryKey
+      tags:
+      - Account
+      summary: Store the recovery-wrapped private key
+      description: |
+        Error codes: `400 invalid_input`, `409 keys_not_set_up` (`kdf_version: 0` accounts).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecoveryRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountKeys'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /account/v1/overview:
+    get:
+      operationId: getAccountOverview
+      tags:
+      - Account
+      summary: Everything a client needs after login
+      description: |
+        Account, devices with their vault cursors, vaults, pending invites and (when subscriptions are enabled) the subscription status. Heavy route (per-user heavy rate limit).
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountOverview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /account/v1/password/forgot:
+    post:
+      operationId: forgotPassword
+      tags:
+      - Account
+      summary: Request a password reset email
+      description: |
+        Always `202`, whether or not the account exists. JSON answers `{"status":"reset_sent_if_account_exists"}`;
+        a form post (`application/x-www-form-urlencoded`, field `email`) answers an HTML page.
+        Feature-gated by `password_reset`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ForgotPasswordRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+              required:
+              - email
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+            text/html:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+  /account/v1/password/reset:
+    get:
+      operationId: resetPasswordPage
+      tags:
+      - Pages
+      summary: Password reset page
+      description: |
+        HTML page with an "Open Cortex" button linking `cortex://reset-password?token=<token>&server=<public url>`. Expired tokens answer `410` with a page offering to resend. Feature-gated by `password_reset`.
+      parameters:
+      - name: token
+        in: query
+        required: true
+        description: Single-use token from the email link.
+        schema:
+          type: string
+      responses:
+        '200':
+          description: HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '410':
+          description: 'HTML page: link expired or already used'
+          content:
+            text/html:
+              schema:
+                type: string
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+    post:
+      operationId: resetPassword
+      tags:
+      - Account
+      summary: Reset the password with a token
+      description: |
+        JSON (or legacy form post). Reset with `kdf_salt` makes the account `kdf_version: 1` (`public_key` and
+        `encrypted_private_key` required). Without key fields the account returns to `kdf_version: 0`, its identity
+        and vault keys are deleted and `member_key_changed` is emitted. Revokes every session. Feature-gated by
+        `password_reset`.
+
+        Error codes (JSON): `400 invalid_input`, `404 not_found` (unknown or expired token), `404 feature_disabled`,
+        `503 server_busy`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetPasswordRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                token:
+                  type: string
+                password:
+                  type: string
+              required:
+              - token
+              - password
+      responses:
+        '200':
+          description: Password reset
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+            text/html:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '410':
+          description: 'HTML page: token expired (form posts)'
+          content:
+            text/html:
+              schema:
+                type: string
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      security: []
+  /account/v1/password/reset/prepare:
+    post:
+      operationId: prepareResetPassword
+      tags:
+      - Account
+      summary: Fetch key material before a reset
+      description: |
+        Does not consume the token. Error codes: `404 not_found` (unknown or expired token), `404 feature_disabled`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetPrepareRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResetPrepareResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+  /auth/v1/login:
+    post:
+      operationId: login
+      tags:
+      - Auth
+      summary: Log in and register the device
+      description: |
+        Exchanges credentials for an access/refresh token pair bound to `device_id` (client-generated uuid).
+        `public_key` and `encrypted_private_key` are `null` for `kdf_version: 0` accounts. Repeated failures for the
+        same email and client IP lock login (1 minute, doubling up to 1 hour).
+
+        Error codes: `400 invalid_input`, `401 invalid_credentials`, `403 device_revoked`, `403 limit_reached`
+        (device cap), `409 device_conflict`, `429 too_many_attempts` (with `Retry-After`) or `rate_limited`,
+        `503 server_busy`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      security: []
+  /auth/v1/logout:
+    post:
+      operationId: logout
+      tags:
+      - Auth
+      summary: Log out this device or every device
+      description: |
+        Revokes the refresh tokens and, immediately, the access tokens of the current device (or of every device with
+        `all_devices: true`). The body is optional.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /auth/v1/prelogin:
+    post:
+      operationId: prelogin
+      tags:
+      - Auth
+      summary: Get KDF parameters for an email
+      description: |
+        Returns the Argon2id parameters and salt the client needs to derive the auth key. Unknown emails get
+        `kdf_version: 1` with a deterministic fake salt so the response does not reveal whether an account exists.
+        Rate limited as a sensitive route.
+
+        Error codes: `400 invalid_input`, `429 rate_limited`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PreloginRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreloginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+  /auth/v1/register:
+    post:
+      operationId: register
+      tags:
+      - Auth
+      summary: Create an account
+      description: |
+        With `kdf_salt` the account is `kdf_version: 1` and `public_key` plus `encrypted_private_key` are required.
+        Without it the account is legacy (`kdf_version: 0`) and no key field may be sent. Binary fields are base64.
+        The first account on a server becomes the instance admin. Rate limited per IP (sensitive and registrations per hour).
+
+        Error codes: `400 invalid_input`, `403 registration_closed`, `409 user_exists`, `429 rate_limited`,
+        `503 server_busy` (password hashing capacity exhausted, with `Retry-After`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Account created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      security: []
+  /auth/v1/token/refresh:
+    post:
+      operationId: refreshToken
+      tags:
+      - Auth
+      summary: Rotate the refresh token
+      description: |
+        Consumes the refresh token and issues a new pair. Presenting the same token again within 30 seconds of its
+        rotation returns a fresh pair; after that it counts as reuse and revokes every session.
+
+        Error codes: `400 invalid_input`, `401 invalid_credentials`, `401 token_expired`, `401 token_revoked`,
+        `401 token_reuse`, `403 device_revoked`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+  /avatars/v1/{userID}/{file}:
+    get:
+      operationId: getAvatar
+      tags:
+      - Account
+      summary: Download an avatar
+      description: |
+        Public, content-addressed JPEG (`Cache-Control: public, max-age=31536000, immutable`). Feature-gated by
+        `avatars`. `304` when `If-None-Match` matches the `ETag`.
+      parameters:
+      - $ref: '#/components/parameters/UserID'
+      - $ref: '#/components/parameters/AvatarFile'
+      - name: If-None-Match
+        in: header
+        required: false
+        description: ETag of a previous download.
+        schema:
+          type: string
+      responses:
+        '200':
+          description: JPEG image
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        '304':
+          $ref: '#/components/responses/NotModified'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+  /devices/v1/:
+    get:
+      operationId: listDevices
+      tags:
+      - Devices
+      summary: List the account's devices
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Device'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /devices/v1/{deviceID}:
+    get:
+      operationId: getDevice
+      tags:
+      - Devices
+      summary: Get a device
+      description: |
+        Error codes: `400 invalid_input`, `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/DeviceID'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    delete:
+      operationId: revokeDevice
+      tags:
+      - Devices
+      summary: Revoke a device
+      description: |
+        Revokes the device's refresh and access tokens immediately.
+
+        Error codes: `400 invalid_input`, `403 device_revoked` (already revoked), `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/DeviceID'
+      responses:
+        '204':
+          description: No Content
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    patch:
+      operationId: updateDevice
+      tags:
+      - Devices
+      summary: Rename a device
+      description: |
+        Error codes: `400 invalid_input`, `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/DeviceID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateDeviceRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /health:
+    get:
+      operationId: getHealth
+      tags:
+      - Health
+      summary: Liveness probe
+      description: |
+        Always `200 {"status":"ok"}` while the process is serving requests.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+  /invite/{token}:
+    get:
+      operationId: invitePage
+      tags:
+      - Pages
+      summary: Invite landing page
+      description: |
+        HTML page that opens `cortex://invite/{token}` (keeping the URL fragment) and offers a decline button. `404` (invalid) and `410` (expired or used) are HTML pages.
+      parameters:
+      - $ref: '#/components/parameters/Token'
+      responses:
+        '200':
+          description: HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+        '404':
+          description: 'HTML page: invalid invite'
+          content:
+            text/html:
+              schema:
+                type: string
+        '410':
+          description: 'HTML page: invite expired or used'
+          content:
+            text/html:
+              schema:
+                type: string
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+  /invite/{token}/decline:
+    post:
+      operationId: declineInvitePage
+      tags:
+      - Pages
+      summary: Decline an invite (form post)
+      description: |
+        Form post from the landing page; deletes the invite and emails the inviter. Answers HTML pages.
+      parameters:
+      - $ref: '#/components/parameters/Token'
+      responses:
+        '200':
+          description: 'HTML page: invite declined'
+          content:
+            text/html:
+              schema:
+                type: string
+        '404':
+          description: 'HTML page: invalid invite'
+          content:
+            text/html:
+              schema:
+                type: string
+        '410':
+          description: 'HTML page: invite expired or used'
+          content:
+            text/html:
+              schema:
+                type: string
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+  /invites/v1/{token}:
+    get:
+      operationId: previewInvite
+      tags:
+      - Invites
+      summary: Preview an invite by token
+      description: |
+        Public (sensitive rate limit). Error codes: `404 not_found`, `409 already_exists` (used), `410 invite_expired`.
+      parameters:
+      - $ref: '#/components/parameters/Token'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvitePreview'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+  /meta/v1/capabilities:
+    get:
+      operationId: getCapabilities
+      tags:
+      - Meta
+      summary: Server features and limits
+      description: |
+        Public. Lets clients adapt to the server configuration (`Cache-Control: public, max-age=60`). Limits that are `0` (disabled) are omitted, except the size limits, batch limits and `protection`.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Capabilities'
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+  /ready:
+    get:
+      operationId: getReadiness
+      tags:
+      - Health
+      summary: Readiness probe
+      description: |
+        Checks PostgreSQL and blob storage (cached for one minute while ready). `503` carries `status` `draining` (shutdown in progress), `database_unavailable` or `storage_unavailable`.
+      responses:
+        '200':
+          description: 'Ready (`status: ready`)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          description: Not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+      security: []
+  /s/{shareID}:
+    get:
+      operationId: sharePage
+      tags:
+      - Pages
+      summary: Shared note viewer page
+      description: |
+        Public static viewer (strict CSP, `frame-ancestors 'none'`). It fetches `/share/v1/{shareID}` and decrypts in the browser with the key in the URL fragment (`#k=<base64url key>`), which is never sent to the server. `404` is an HTML page. Feature-gated by `public_links` (`404 feature_disabled`, JSON).
+      parameters:
+      - $ref: '#/components/parameters/ShareID'
+      responses:
+        '200':
+          description: HTML viewer
+          content:
+            text/html:
+              schema:
+                type: string
+        '404':
+          description: HTML page (share unavailable) or JSON `feature_disabled`
+          content:
+            text/html:
+              schema:
+                type: string
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+  /share/v1/{shareID}:
+    get:
+      operationId: getShareContent
+      tags:
+      - Shares
+      summary: Download a shared note's ciphertext
+      description: |
+        Public. `ETag: "r<revision>"`, `X-Share-Revision`, `Cache-Control: no-cache`; `If-None-Match` gives `304`. `404` when the link is unknown, revoked, expired, unpublished or disabled by the vault. Feature-gated by `public_links`.
+      parameters:
+      - $ref: '#/components/parameters/ShareID'
+      - name: If-None-Match
+        in: header
+        required: false
+        description: ETag of a previous download.
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Encrypted bundle
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            X-Share-Revision:
+              $ref: '#/components/headers/XShareRevision'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '304':
+          $ref: '#/components/responses/NotModified'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+  /subscription/v1/checkout:
+    post:
+      operationId: createCheckout
+      tags:
+      - Subscription
+      summary: Create a Stripe Checkout session
+      description: |
+        Only registered when `CORTEX_SUBSCRIPTION_ENABLED=true` (otherwise the route does not exist).
+
+        Error codes: `400 invalid_input` (missing or invalid return URL), `404 not_found`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckoutRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckoutResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /subscription/v1/status:
+    get:
+      operationId: getSubscriptionStatus
+      tags:
+      - Subscription
+      summary: Get the subscription status
+      description: |
+        Only registered when subscriptions are enabled. Without a subscription: `{"status":"none","entitled":false}`.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriptionStatus'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/changes:
+    get:
+      operationId: listChanges
+      tags:
+      - Changes
+      summary: Poll sync events since a cursor
+      description: |
+        Polling fallback for SSE, limited to paths the caller can view. Pass `X-Next-Cursor` as `since` for the next page
+        while `X-Has-More` is `true`. Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input`, `403 vault_access_denied`, `410 cursor_expired` (run a full resync from
+        `GET /files/list` and continue from its `X-Latest-Event-ID`).
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - name: since
+        in: query
+        required: false
+        description: Return events after this event id.
+        schema:
+          type: integer
+          format: int64
+      - name: limit
+        in: query
+        required: false
+        description: Max events (default 100, clamped to 1000).
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SyncEvent'
+          headers:
+            X-Has-More:
+              $ref: '#/components/headers/XHasMore'
+            X-Next-Cursor:
+              $ref: '#/components/headers/XNextCursor'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/collab:
+    get:
+      operationId: collabConnect
+      tags:
+      - Collab
+      summary: WebSocket for real-time co-editing (Yjs)
+      description: |
+        WebSocket upgrade (`101 Switching Protocols`). Not behind the bearer middleware: authentication is the `ticket`
+        query parameter from `POST /collab/tickets` (60 s, single use). Feature-gated by `collab` (`404 feature_disabled`).
+
+        Payloads (`update`, `awareness`, `sync_step1`, `sync_step2`, `compact`) are end-to-end encrypted envelopes
+        `[0x01][nonce 12][AES-256-GCM ciphertext || tag 16]` relayed and stored as opaque bytes.
+
+        Default frames are JSON text messages (`CollabMessage`, binary payloads base64 in `data`). With `frames=binary`,
+        `sync_step1` (1), `sync_step2` (2), `update` (3) and `awareness` (4) travel as binary messages:
+        client to server `[opcode u8][payload]`, server to client `[opcode u8][client_id length u8][client_id][payload]`.
+        Control messages stay JSON in both modes.
+
+        Close codes after the upgrade: `1001` server shutting down, `1008` room full, `1013` buffer full,
+        `4402` subscription entitlement lapsed, `4403` access changed (reconnect), `4408` client too slow (reconnect and
+        resync), `4429` too many messages.
+
+        Errors before the upgrade: `400 invalid_input`, `401 unauthorized` (missing, invalid, expired or used ticket),
+        `403 forbidden` / `insufficient_role`, `404 feature_disabled`, `429 rate_limited` (socket cap, `Retry-After: 5`),
+        `503 unavailable` (draining).
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - name: path
+        in: query
+        required: true
+        description: Vault-relative file path.
+        schema:
+          type: string
+      - name: ticket
+        in: query
+        required: true
+        description: Collab ticket bound to this vault and path.
+        schema:
+          type: string
+      - name: frames
+        in: query
+        required: false
+        description: '`binary` to use binary frames for Yjs payloads.'
+        schema:
+          type: string
+          enum:
+          - binary
+      responses:
+        '101':
+          description: Switching Protocols (WebSocket established)
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      security: []
+  /sync/v1/vaults/{vaultID}/collab/peers:
+    get:
+      operationId: getCollabPeers
+      tags:
+      - Collab
+      summary: Peers editing a file
+      description: |
+        Feature-gated by `collab` (`404 feature_disabled`). Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input`, `403 forbidden` / `insufficient_role`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - name: path
+        in: query
+        required: true
+        description: Vault-relative file path.
+        schema:
+          type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CollabPeers'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/collab/tickets:
+    post:
+      operationId: createCollabTicket
+      tags:
+      - Collab
+      summary: Create a collab WebSocket ticket
+      description: |
+        Short-lived (60 s), single-use ticket bound to user, vault and path. Request one per connection attempt. Feature-gated by `collab` (`404 feature_disabled`). Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input`, `403 forbidden` / `insufficient_role`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CollabTicketRequest'
+      responses:
+        '201':
+          description: Ticket created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CollabTicket'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/cursor:
+    put:
+      operationId: updateCursor
+      tags:
+      - Changes
+      summary: Store this device's sync position
+      description: |
+        Shown in the overviews as `vault_cursors`. Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input`, `403 vault_access_denied`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCursorRequest'
+      responses:
+        '204':
+          description: No Content
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/encryption:
+    get:
+      operationId: getVaultEncryption
+      tags:
+      - Keys
+      summary: Get the legacy password-wrapped VEK
+      description: |
+        `has_member_keys` is `true` when any member has a sealed vault key. Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input`, `403 forbidden` / `insufficient_role`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultEncryption'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    post:
+      operationId: createVaultEncryption
+      tags:
+      - Keys
+      summary: Store the legacy password-wrapped VEK
+      description: |
+        Admin or owner. Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input`, `403 forbidden` / `insufficient_role`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVaultEncryptionRequest'
+      responses:
+        '201':
+          description: 'Created (`status: created`)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/events:
+    get:
+      operationId: streamEvents
+      tags:
+      - Realtime
+      summary: Server-Sent Events stream of vault changes
+      description: |
+        Long-lived `text/event-stream`. The first frame is `retry: 5000`. With `Last-Event-ID` the server replays missed
+        events before live ones, or sends a `reset` event (`data: {"reason":"cursor_expired"}`, no `id`) when the cursor
+        is older than the retained history: discard the cursor, run a full resync and keep the stream open.
+
+        Events with `id` (replayable): `file_created`, `file_updated`, `file_deleted`, `file_renamed` (data: `SyncEventData`).
+        Ephemeral events (no `id`): `collab_active`, `collab_inactive` (`{"file_path"}`), `member_joined`
+        (`{"user_id","role","has_key"}`), `member_role_changed` (`{"user_id","role"}`), `member_removed`, `key_granted`,
+        `member_key_changed` (`{"user_id"}`), `access_changed` (`{}`). `ping` (`data: {}`) every 30 seconds.
+
+        Events are filtered to paths the caller can view. A change of the caller's own role or removal closes the
+        stream. Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `403 forbidden`, `503 server_busy` (stream limits, `Retry-After`), `503 unavailable` (draining).
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - name: Last-Event-ID
+        in: header
+        required: false
+        description: Resume after this event id (replay).
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: 'SSE frames: `id:`, `event:`, `data:` lines separated by blank lines.'
+              example: |+
+                retry: 5000
+
+                id: 42
+                event: file_updated
+                data: {"vault_uuid":"...","file_path":"notes/a.md","version":2,"actor_id":"...","device_id":"..."}
+
+                event: ping
+                data: {}
+
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/files:
+    post:
+      operationId: uploadSnapshot
+      tags:
+      - Files
+      summary: Upload an encrypted file snapshot
+      description: |
+        Raw ciphertext body. `Content-Length` is required (`411 length_required` otherwise). If the checksum matches the
+        current, non-deleted version no snapshot is created and the answer is `200` with the existing file info.
+        Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input`, `403 insufficient_role`, `409 conflict` (X-Base-Version mismatch),
+        `411 length_required`, `413 file_too_large`, `413`/`429 upload_budget_exceeded`, `503 server_busy` (too many
+        concurrent uploads, `Retry-After`), `507 quota_exceeded`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - name: X-File-Path
+        in: header
+        required: true
+        description: Vault-relative file path.
+        schema:
+          type: string
+      - name: X-File-Path-Encoding
+        in: header
+        required: false
+        description: '`uri` when `X-File-Path` is percent-encoded (required for non-ASCII paths).'
+        schema:
+          type: string
+          enum:
+          - uri
+      - name: X-Base-Version
+        in: header
+        required: false
+        description: Expected current version; a mismatch returns `409 conflict`.
+        schema:
+          type: integer
+          minimum: 0
+      - name: X-Local-Hash
+        in: header
+        required: false
+        description: Client-computed checksum.
+        schema:
+          type: string
+      - name: X-Checksum
+        in: header
+        required: false
+        description: Alias for `X-Local-Hash`, used when it is absent.
+        schema:
+          type: string
+      - name: X-Content-Type
+        in: header
+        required: false
+        description: Original content type (default `application/octet-stream`).
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: Unchanged (checksum matches the current version)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileInfo'
+        '201':
+          description: Snapshot stored (includes `snapshot_id`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileInfo'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '411':
+          $ref: '#/components/responses/LengthRequired'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    get:
+      operationId: downloadSnapshot
+      tags:
+      - Files
+      summary: Download an encrypted file snapshot
+      description: |
+        Without `version` the latest snapshot is served and `X-File-Version` is the file's current version (it can be
+        ahead of the snapshot when deltas follow). With `version` the newest snapshot at or before it is served.
+        `304` when `If-None-Match` equals the snapshot `ETag`. Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input`, `403 vault_access_denied` / `insufficient_role`, `404 not_found` (also the
+        latest version of a deleted file).
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - name: path
+        in: query
+        required: true
+        description: Vault-relative file path.
+        schema:
+          type: string
+      - name: version
+        in: query
+        required: false
+        description: Specific version (default latest).
+        schema:
+          type: integer
+          minimum: 0
+      - name: If-None-Match
+        in: header
+        required: false
+        description: ETag of a previous download.
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Encrypted snapshot bytes
+          headers:
+            X-File-Path:
+              $ref: '#/components/headers/XFilePath'
+            X-File-Path-Encoded:
+              $ref: '#/components/headers/XFilePathEncoded'
+            X-File-Version:
+              $ref: '#/components/headers/XFileVersion'
+            X-Snapshot-Version:
+              $ref: '#/components/headers/XSnapshotVersion'
+            X-Checksum:
+              $ref: '#/components/headers/XChecksum'
+            X-Size-Bytes:
+              $ref: '#/components/headers/XSizeBytes'
+            X-Created-By:
+              $ref: '#/components/headers/XCreatedBy'
+            X-Author-Device-ID:
+              $ref: '#/components/headers/XAuthorDeviceID'
+            X-Device-ID:
+              $ref: '#/components/headers/XDeviceIDResponse'
+            X-Snapshot-ID:
+              $ref: '#/components/headers/XSnapshotID'
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '304':
+          $ref: '#/components/responses/NotModified'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    delete:
+      operationId: deleteFile
+      tags:
+      - Files
+      summary: Delete a file
+      description: |
+        Soft-deletes the file (bumps its version) and its exact-file access rule. Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input`, `403 insufficient_role`, `404 not_found`, `409 conflict`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - name: path
+        in: query
+        required: true
+        description: Vault-relative file path.
+        schema:
+          type: string
+      - name: X-Base-Version
+        in: header
+        required: false
+        description: Expected current version; a mismatch returns `409 conflict`.
+        schema:
+          type: integer
+          minimum: 0
+      responses:
+        '204':
+          description: No Content
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/files/batch:
+    post:
+      operationId: batchDownload
+      tags:
+      - Files
+      summary: Download many snapshots in one stream
+      description: |
+        `version: 0` means latest. Limits: 1-200 items and 64 MiB total (`limits.batch_max_items` /
+        `limits.batch_max_bytes`); one batch per user at a time (`503 server_busy`). Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        The `200` body (`application/vnd.cortex.batch`) is one frame per requested item, in request order:
+
+        | Field | Type |
+        |-------|------|
+        | header length | u32, big-endian |
+        | header | JSON (`BatchFrameHeader`), `header length` bytes |
+        | body length | u64, big-endian |
+        | body | raw encrypted snapshot, `body length` bytes (0 when `status` is not `ok`) |
+
+        Error codes (before streaming starts): `400 invalid_input`, `403 vault_access_denied`, `413 file_too_large`,
+        `503 server_busy`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchRequest'
+      responses:
+        '200':
+          description: Framed batch stream
+          headers:
+            X-Batch-Count:
+              $ref: '#/components/headers/XBatchCount'
+          content:
+            application/vnd.cortex.batch:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/files/bulk:
+    post:
+      operationId: bulkGetFileInfo
+      tags:
+      - Files
+      summary: Fetch metadata for many files
+      description: |
+        Up to 1000 paths. Missing files and paths the caller cannot view are omitted. Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input`, `403 vault_access_denied`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkFileInfoRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FileInfo'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/files/deltas:
+    post:
+      operationId: uploadDelta
+      tags:
+      - Files
+      summary: Upload an encrypted delta
+      description: |
+        `needs_snapshot: true` in the response asks the client to upload a full snapshot. Resending an already applied
+        delta returns the current file info instead of `409`. Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input`, `403 insufficient_role`, `409 conflict`, `413 delta_too_large`,
+        `413 payload_too_large`, `507 quota_exceeded`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadDeltaRequest'
+      responses:
+        '201':
+          description: Delta stored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileInfo'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    get:
+      operationId: downloadDeltas
+      tags:
+      - Files
+      summary: List deltas since a version
+      description: |
+        Ordered by `base_version`. When more deltas remain, `X-Next-Cursor` carries the `since_version` for the next page. Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input`, `403 insufficient_role`, `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - name: path
+        in: query
+        required: true
+        description: Vault-relative file path.
+        schema:
+          type: string
+      - name: since_version
+        in: query
+        required: false
+        description: Return deltas whose `base_version` is at least this value.
+        schema:
+          type: integer
+          minimum: 0
+      - name: limit
+        in: query
+        required: false
+        description: Page size; `0` or omitted uses 200, values above 200 are capped.
+        schema:
+          type: integer
+          minimum: 0
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Delta'
+          headers:
+            X-Next-Cursor:
+              $ref: '#/components/headers/XNextCursor'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/files/history:
+    get:
+      operationId: getFileHistory
+      tags:
+      - Files
+      summary: List recent snapshots of a file
+      description: |
+        Up to 200 most recent snapshots. Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input`, `403 insufficient_role`, `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - name: path
+        in: query
+        required: true
+        description: Vault-relative file path.
+        schema:
+          type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/HistoryEntry'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/files/info:
+    get:
+      operationId: getFileInfo
+      tags:
+      - Files
+      summary: Get file metadata
+      description: |
+        Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input`, `403 insufficient_role`, `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - name: path
+        in: query
+        required: true
+        description: Vault-relative file path.
+        schema:
+          type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileInfo'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/files/list:
+    get:
+      operationId: listFiles
+      tags:
+      - Files
+      summary: List current files
+      description: |
+        Ordered by path, limited to paths the caller can view. The first page (no `cursor`) is a heavy route and carries
+        a weak `ETag`; `304` when `If-None-Match` matches. `X-Latest-Event-ID` is the cursor to use for `/changes` or
+        SSE `Last-Event-ID`. Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input`, `403 vault_access_denied`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - name: include_deleted
+        in: query
+        required: false
+        description: '`true` to include deleted files.'
+        schema:
+          type: boolean
+      - name: limit
+        in: query
+        required: false
+        description: Page size; `0` or omitted uses 1000, values above 5000 are capped.
+        schema:
+          type: integer
+          minimum: 0
+      - name: cursor
+        in: query
+        required: false
+        description: Value of `X-Next-Cursor` from the previous page.
+        schema:
+          type: string
+      - name: If-None-Match
+        in: header
+        required: false
+        description: ETag of a previous first-page response.
+        schema:
+          type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FileInfo'
+          headers:
+            X-Latest-Event-ID:
+              $ref: '#/components/headers/XLatestEventID'
+            X-Next-Cursor:
+              $ref: '#/components/headers/XNextCursor'
+            ETag:
+              $ref: '#/components/headers/ETag'
+        '304':
+          description: Not Modified (first page only)
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            X-Latest-Event-ID:
+              $ref: '#/components/headers/XLatestEventID'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/files/rename:
+    post:
+      operationId: renameFile
+      tags:
+      - Files
+      summary: Rename a file
+      description: |
+        Needs `edit` access on both paths. Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input`, `403 insufficient_role`, `404 not_found`, `409 path_exists`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RenameFileRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileInfo'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/files/restore:
+    post:
+      operationId: restoreFile
+      tags:
+      - Files
+      summary: Undelete a file
+      description: |
+        Bumps the version, keeps the latest snapshot as content and emits `file_created`. Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input` (file not deleted), `403 insufficient_role`, `404 not_found` (no snapshot).
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - name: path
+        in: query
+        required: true
+        description: Vault-relative file path.
+        schema:
+          type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/presence:
+    get:
+      operationId: getVaultPresence
+      tags:
+      - Collab
+      summary: Who is editing which file
+      description: |
+        Across all instances, filtered to paths the caller can view. Feature-gated by `collab` (`404 feature_disabled`). Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `403 forbidden` / `insufficient_role`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FilePresence'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/shares/:
+    get:
+      operationId: listShares
+      tags:
+      - Shares
+      summary: List shared notes
+      description: |
+        Only paths the caller can view. Feature-gated by `public_links` (`404 feature_disabled`). Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Share'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    post:
+      operationId: createShare
+      tags:
+      - Shares
+      summary: Create a public link for a note
+      description: |
+        One link per note: `200` with the existing share if the note is already shared. Editor or above. Feature-gated by `public_links` (`404 feature_disabled`). Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input` (malformed key, expiry in the past), `403 insufficient_role`,
+        `403 public_links_disabled`, `403 limit_reached`, `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateShareRequest'
+      responses:
+        '200':
+          description: Existing share
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Share'
+        '201':
+          description: Share created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Share'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/shares/{shareID}:
+    patch:
+      operationId: updateShare
+      tags:
+      - Shares
+      summary: Change a share's expiry
+      description: |
+        `expires_at: null` removes the expiry. Feature-gated by `public_links` (`404 feature_disabled`). Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input`, `403 insufficient_role`, `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - $ref: '#/components/parameters/ShareID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateShareRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Share'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    delete:
+      operationId: revokeShare
+      tags:
+      - Shares
+      summary: Revoke a public link
+      description: |
+        The link stops working immediately. Feature-gated by `public_links` (`404 feature_disabled`). Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `403 insufficient_role`, `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - $ref: '#/components/parameters/ShareID'
+      responses:
+        '204':
+          description: No Content
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/shares/{shareID}/content:
+    put:
+      operationId: publishShareContent
+      tags:
+      - Shares
+      summary: Upload the encrypted share bundle
+      description: |
+        Body: `nonce(12) | AES-256-GCM ciphertext | tag(16)` of a gzip-compressed JSON bundle encrypted with the link key.
+        `Content-Length` required. Increments `revision`. Heavy route with upload limits. Feature-gated by `public_links` (`404 feature_disabled`). Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `403 insufficient_role`, `403 public_links_disabled`, `404 not_found`, `411 length_required`,
+        `413 file_too_large`, `413`/`429 upload_budget_exceeded`, `503 server_busy`, `507 quota_exceeded`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - $ref: '#/components/parameters/ShareID'
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Share'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '411':
+          $ref: '#/components/responses/LengthRequired'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/templates/:
+    get:
+      operationId: listTemplates
+      tags:
+      - Templates
+      summary: List templates visible to the caller
+      description: |
+        Newest first. Viewer or above. Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `403 insufficient_role`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Template'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    post:
+      operationId: createTemplate
+      tags:
+      - Templates
+      summary: Create a template
+      description: |
+        Editor or above. `team` payloads must be encrypted with the vault key (`encrypted: true`); `link` and `market`
+        payloads must be plaintext. Payload max 1 MiB decoded. Heavy route. Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input`, `403 insufficient_role`, `403 public_links_disabled`, `413 file_too_large`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTemplateRequest'
+      responses:
+        '201':
+          description: Template created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Template'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/templates/{templateID}:
+    patch:
+      operationId: updateTemplate
+      tags:
+      - Templates
+      summary: Update template metadata
+      description: |
+        Any subset of fields. `group_id: null` clears the group; omitting it keeps it. Moving between `team` and
+        `link`/`market` must also carry `payload` and `encrypted`. Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input`, `403 insufficient_role`, `403 public_links_disabled`, `404 not_found`,
+        `413 file_too_large`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - $ref: '#/components/parameters/TemplateID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTemplateRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Template'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    delete:
+      operationId: deleteTemplate
+      tags:
+      - Templates
+      summary: Delete a template
+      description: |
+        Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `403 insufficient_role`, `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - $ref: '#/components/parameters/TemplateID'
+      responses:
+        '204':
+          description: No Content
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /sync/v1/vaults/{vaultID}/templates/{templateID}/payload:
+    get:
+      operationId: getTemplatePayload
+      tags:
+      - Templates
+      summary: Get a template payload
+      description: |
+        Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `403 insufficient_role`, `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - $ref: '#/components/parameters/TemplateID'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplatePayload'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    put:
+      operationId: replaceTemplatePayload
+      tags:
+      - Templates
+      summary: Replace a template payload
+      description: |
+        Increments `version`; a `market` template goes back to `pending_review`. Heavy route. Requires an active entitlement when subscription enforcement is enabled (in multi-tenant mode the vault owner's; `402`).
+
+        Error codes: `400 invalid_input`, `403 insufficient_role`, `404 not_found`, `413 file_too_large`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - $ref: '#/components/parameters/TemplateID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceTemplatePayloadRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Template'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /template/v1/market:
+    get:
+      operationId: listMarketTemplates
+      tags:
+      - Templates
+      summary: Browse the public template marketplace
+      description: |
+        Public. Published `market` templates, newest first, at most 100 (`Cache-Control: public, max-age=60`). Feature-gated by `public_links`.
+
+        Error codes: `400 invalid_input` (unknown `kind`), `404 feature_disabled`.
+      parameters:
+      - name: kind
+        in: query
+        required: false
+        description: Filter by kind.
+        schema:
+          type: string
+          enum:
+          - note
+          - database
+      - name: q
+        in: query
+        required: false
+        description: Case-insensitive match on name and description.
+        schema:
+          type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PublicTemplate'
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+  /template/v1/{slug}:
+    get:
+      operationId: getPublicTemplate
+      tags:
+      - Templates
+      summary: Get a public template by slug
+      description: |
+        Public. `link` templates and published `market` templates; others answer `404`. Feature-gated by `public_links`.
+      parameters:
+      - $ref: '#/components/parameters/Slug'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicTemplatePayload'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+  /users/v1/{userID}/public-key:
+    get:
+      operationId: getUserPublicKey
+      tags:
+      - Keys
+      summary: Get a user's public key
+      description: |
+        Error codes: `400 invalid_input`, `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/UserID'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPublicKey'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /vaults/v1/:
+    get:
+      operationId: listVaults
+      tags:
+      - Vaults
+      summary: List vaults the caller is a member of
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Vault'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    post:
+      operationId: createVault
+      tags:
+      - Vaults
+      summary: Create a vault
+      description: |
+        Accepts an optional client-generated `id` for idempotency: retrying with the same `id` returns `201` with the
+        existing vault when the caller owns it. Requires an active entitlement when subscription enforcement is enabled (`402 subscription_required` / `subscription_expired`).
+
+        Error codes: `400 invalid_input` (invalid `id`, name or non-base64 `encrypted_vault_key`), `403 insufficient_role`
+        (`CORTEX_VAULT_CREATION=admins`), `403 limit_reached`, `409 already_exists` (`id` used by another owner).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVaultRequest'
+      responses:
+        '201':
+          description: Vault created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vault'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /vaults/v1/invites:
+    get:
+      operationId: listMyInvites
+      tags:
+      - Invites
+      summary: List pending invites for the caller's email
+      description: |
+        Returns `[]` when mail is disabled or the caller's email is not verified.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Invite'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /vaults/v1/invites/accept:
+    post:
+      operationId: acceptInvite
+      tags:
+      - Invites
+      summary: Accept an invite
+      description: |
+        Send either `token` (works for any account) or `invite_id` (requires the caller's email to match and mail to be
+        enabled). Returns the vault plus `encrypted_vault_key` when the invite carried one; emits `member_joined`. Requires an active entitlement when subscription enforcement is enabled (`402 subscription_required` / `subscription_expired`).
+
+        Error codes: `400 invalid_input`, `403 vault_access_denied`, `403 email_not_verified`, `403 domain_not_allowed`,
+        `404 not_found`, `404 feature_disabled`, `409 already_exists`, `410 invite_expired`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcceptInviteRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptedVault'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /vaults/v1/{vaultID}/:
+    get:
+      operationId: getVault
+      tags:
+      - Vaults
+      summary: Get a vault
+      description: |
+        Error codes: `400 invalid_input`, `403 vault_access_denied`, `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vault'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    patch:
+      operationId: updateVault
+      tags:
+      - Vaults
+      summary: Update vault settings
+      description: |
+        Admin or owner. Every field is optional. `storage_quota_bytes: null` clears the quota; quotas are only accepted
+        in multi-tenant mode and from an instance admin. Requires an active entitlement when subscription enforcement is enabled (`402 subscription_required` / `subscription_expired`).
+
+        Error codes: `400 invalid_input`, `403 insufficient_role`, `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateVaultRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vault'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    delete:
+      operationId: deleteVault
+      tags:
+      - Vaults
+      summary: Delete a vault
+      description: |
+        Owner only. Blobs are deleted asynchronously; open SSE and collab connections are closed. Requires an active entitlement when subscription enforcement is enabled (`402 subscription_required` / `subscription_expired`).
+
+        Error codes: `403 insufficient_role`, `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      responses:
+        '204':
+          description: No Content
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /vaults/v1/{vaultID}/access/:
+    get:
+      operationId: listAccessRules
+      tags:
+      - Access
+      summary: List path access rules
+      description: |
+        Admin or owner. Ordered by path.
+
+        Error codes: `403 insufficient_role`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AccessRule'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    put:
+      operationId: putAccessRule
+      tags:
+      - Access
+      summary: Upsert a path access rule
+      description: |
+        Admin or owner. Upserts the rule for `path` and replaces its entries. Returns `204` when `restricted` is `false`
+        and `entries` is empty (the rule is deleted). Emits `access_changed`. Requires an active entitlement when subscription enforcement is enabled (`402 subscription_required` / `subscription_expired`).
+
+        Error codes: `400 invalid_input`, `403 insufficient_role`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccessRule'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessRule'
+        '204':
+          description: Rule deleted
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /vaults/v1/{vaultID}/groups/:
+    get:
+      operationId: listGroups
+      tags:
+      - Access
+      summary: List groups
+      description: |
+        Viewer or above. Error codes: `403 insufficient_role`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Group'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    post:
+      operationId: createGroup
+      tags:
+      - Access
+      summary: Create a group
+      description: |
+        Admin or owner. Names are 1-64 characters, unique per vault ignoring case. Requires an active entitlement when subscription enforcement is enabled (`402 subscription_required` / `subscription_expired`).
+
+        Error codes: `400 invalid_input`, `403 insufficient_role`, `409 group_name_taken`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGroupRequest'
+      responses:
+        '201':
+          description: Group created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Group'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /vaults/v1/{vaultID}/groups/{groupID}:
+    patch:
+      operationId: updateGroup
+      tags:
+      - Access
+      summary: Rename a group or replace its members
+      description: |
+        Admin or owner. Requires an active entitlement when subscription enforcement is enabled (`402 subscription_required` / `subscription_expired`).
+
+        Error codes: `400 invalid_input`, `403 insufficient_role`, `404 not_found`, `409 group_name_taken`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - $ref: '#/components/parameters/GroupID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateGroupRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Group'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    delete:
+      operationId: deleteGroup
+      tags:
+      - Access
+      summary: Delete a group
+      description: |
+        Admin or owner; deletes the group's access entries. Requires an active entitlement when subscription enforcement is enabled (`402 subscription_required` / `subscription_expired`).
+
+        Error codes: `403 insufficient_role`, `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - $ref: '#/components/parameters/GroupID'
+      responses:
+        '204':
+          description: No Content
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /vaults/v1/{vaultID}/invites/:
+    get:
+      operationId: listVaultInvites
+      tags:
+      - Invites
+      summary: List pending invites of a vault
+      description: |
+        Admin or owner. Pending, unexpired invites without `encrypted_vault_key`, `invite_token` or `invite_url`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Invite'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    post:
+      operationId: createInvite
+      tags:
+      - Invites
+      summary: Create an invite
+      description: |
+        Admin or owner; admins can only invite roles below their own. `grants` is required (1-100) for `guest` and
+        rejected for other roles. Returns `invite_token` and `invite_url` only here; replaying an existing `id` rotates
+        the token. Requires an active entitlement when subscription enforcement is enabled (`402 subscription_required` / `subscription_expired`).
+
+        Error codes: `400 invalid_input`, `403 insufficient_role`, `403 domain_not_allowed`, `403 limit_reached`,
+        `403 email_not_verified`, `404 feature_disabled` (guest invites while guests are off), `409 already_exists`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInviteRequest'
+      responses:
+        '201':
+          description: Invite created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invite'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/FeatureDisabled'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /vaults/v1/{vaultID}/invites/{inviteID}:
+    delete:
+      operationId: deleteInvite
+      tags:
+      - Invites
+      summary: Delete an invite
+      description: |
+        Requires an active entitlement when subscription enforcement is enabled (`402 subscription_required` / `subscription_expired`).
+
+        Error codes: `400 invalid_input`, `403 insufficient_role`, `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - $ref: '#/components/parameters/InviteID'
+      responses:
+        '204':
+          description: No Content
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /vaults/v1/{vaultID}/keys/me:
+    get:
+      operationId: getMyVaultKey
+      tags:
+      - Keys
+      summary: Get the caller's wrapped vault key
+      description: |
+        Error codes: `403 vault_access_denied`, `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultKey'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    put:
+      operationId: putMyVaultKey
+      tags:
+      - Keys
+      summary: Re-wrap the caller's vault key
+      description: |
+        Error codes: `400 invalid_input`, `403 vault_access_denied`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VaultKeyRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultKey'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /vaults/v1/{vaultID}/keys/pending:
+    get:
+      operationId: listPendingVaultKeys
+      tags:
+      - Keys
+      summary: List members without a vault key
+      description: |
+        Admin or owner. Error codes: `403 insufficient_role`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PendingKey'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /vaults/v1/{vaultID}/keys/{userID}:
+    put:
+      operationId: grantVaultKey
+      tags:
+      - Keys
+      summary: Grant a wrapped vault key to a member
+      description: |
+        Admin or owner; emits `key_granted`. Insert-only unless the caller outranks the member.
+
+        Error codes: `400 invalid_input`, `403 insufficient_role`, `404 not_found`, `409 key_exists`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - $ref: '#/components/parameters/UserID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VaultKeyRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultKey'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /vaults/v1/{vaultID}/members/:
+    get:
+      operationId: listMembers
+      tags:
+      - Members
+      summary: List vault members
+      description: |
+        Viewer or above (guests cannot list members).
+
+        Error codes: `403 vault_access_denied`, `403 insufficient_role`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Member'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /vaults/v1/{vaultID}/members/{userID}:
+    patch:
+      operationId: updateMemberRole
+      tags:
+      - Members
+      summary: Change a member's role
+      description: |
+        `guest` and `owner` cannot be assigned. Emits `member_role_changed` and `access_changed`. Requires an active entitlement when subscription enforcement is enabled (`402 subscription_required` / `subscription_expired`).
+
+        Error codes: `400 invalid_input`, `403 insufficient_role`, `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - $ref: '#/components/parameters/UserID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateMemberRoleRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+    delete:
+      operationId: removeMember
+      tags:
+      - Members
+      summary: Remove a member (or leave)
+      description: |
+        A member can remove themselves unless they are the owner. Requires an active entitlement when subscription enforcement is enabled (`402 subscription_required` / `subscription_expired`).
+
+        Error codes: `403 insufficient_role`, `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      - $ref: '#/components/parameters/UserID'
+      responses:
+        '204':
+          description: No Content
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /vaults/v1/{vaultID}/overview:
+    get:
+      operationId: getVaultOverview
+      tags:
+      - Vaults
+      summary: Everything a vault settings screen needs
+      description: |
+        Sections are filled according to the caller's role (see `VaultOverview`). Heavy route.
+
+        Error codes: `400 invalid_input`, `403 forbidden`, `404 not_found`.
+      parameters:
+      - $ref: '#/components/parameters/VaultID'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultOverview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - bearerAuth: []
+        deviceId: []
+  /webhooks/stripe:
+    post:
+      operationId: stripeWebhook
+      tags:
+      - Webhooks
+      summary: Stripe webhook receiver
+      description: |
+        Called by Stripe. The raw body is validated against the `Stripe-Signature` header with the webhook endpoint
+        secret. Handled events: `checkout.session.completed`, `customer.subscription.created`,
+        `customer.subscription.updated`, `customer.subscription.deleted`; other events and duplicate event ids answer
+        `200` without processing. Only registered when subscriptions are enabled.
+
+        Error codes: `400 invalid_input` (invalid payload), `401 unauthorized` (missing or invalid signature).
+      parameters:
+      - name: Stripe-Signature
+        in: header
+        required: true
+        description: Stripe webhook signature header.
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Stripe event
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access token from `POST /auth/v1/login` or `POST /auth/v1/token/refresh`.
+    deviceId:
+      type: apiKey
+      in: header
+      name: X-Device-ID
+      description: Device uuid the access token was issued to (the `device_id` sent at login).
+  parameters:
+    VaultID:
+      name: vaultID
+      in: path
+      required: true
+      description: Vault id.
+      schema:
+        type: string
+        format: uuid
+    DeviceID:
+      name: deviceID
+      in: path
+      required: true
+      description: Device id.
+      schema:
+        type: string
+        format: uuid
+    UserID:
+      name: userID
+      in: path
+      required: true
+      description: User id.
+      schema:
+        type: string
+        format: uuid
+    GroupID:
+      name: groupID
+      in: path
+      required: true
+      description: Group id.
+      schema:
+        type: string
+        format: uuid
+    InviteID:
+      name: inviteID
+      in: path
+      required: true
+      description: Invite id.
+      schema:
+        type: string
+        format: uuid
+    ShareID:
+      name: shareID
+      in: path
+      required: true
+      description: Share id (22-character base64url).
+      schema:
+        type: string
+    TemplateID:
+      name: templateID
+      in: path
+      required: true
+      description: Template id.
+      schema:
+        type: string
+        format: uuid
+    Token:
+      name: token
+      in: path
+      required: true
+      description: Invite token.
+      schema:
+        type: string
+    Slug:
+      name: slug
+      in: path
+      required: true
+      description: Public template slug (12-character base64url).
+      schema:
+        type: string
+    AvatarFile:
+      name: file
+      in: path
+      required: true
+      description: Content-addressed avatar file name (`<hash>.jpg`).
+      schema:
+        type: string
+  headers:
+    RetryAfter:
+      description: Seconds to wait before retrying.
+      schema:
+        type: integer
+    ETag:
+      description: Entity tag of the returned representation.
+      schema:
+        type: string
+    CacheControl:
+      description: Caching directives.
+      schema:
+        type: string
+    XFilePath:
+      description: File path of the served snapshot.
+      schema:
+        type: string
+    XFilePathEncoded:
+      description: Percent-encoded file path, safe for non-ASCII names.
+      schema:
+        type: string
+    XFileVersion:
+      description: File version (current version for latest downloads, snapshot version otherwise).
+      schema:
+        type: integer
+    XSnapshotVersion:
+      description: Version of the served snapshot.
+      schema:
+        type: integer
+    XChecksum:
+      description: Snapshot checksum.
+      schema:
+        type: string
+    XSizeBytes:
+      description: Snapshot size in bytes.
+      schema:
+        type: integer
+        format: int64
+    XCreatedBy:
+      description: User id that created the snapshot.
+      schema:
+        type: string
+        format: uuid
+    XAuthorDeviceID:
+      description: Device id that created the snapshot.
+      schema:
+        type: string
+        format: uuid
+    XDeviceIDResponse:
+      description: Same as `X-Author-Device-ID` (kept for older clients).
+      schema:
+        type: string
+        format: uuid
+    XSnapshotID:
+      description: Snapshot id.
+      schema:
+        type: string
+        format: uuid
+    XNextCursor:
+      description: Cursor for the next page; absent when there is none.
+      schema:
+        type: string
+    XHasMore:
+      description: '`true` when the page is full and more events may follow.'
+      schema:
+        type: boolean
+    XLatestEventID:
+      description: Latest sync event id of the vault when the response was built.
+      schema:
+        type: integer
+        format: int64
+    XBatchCount:
+      description: Number of frames in the batch body.
+      schema:
+        type: integer
+    XShareRevision:
+      description: Revision of the shared note.
+      schema:
+        type: integer
+  responses:
+    BadRequest:
+      description: 'Bad request. Codes: `invalid_input` (malformed body, header or query parameter, missing or invalid `X-Device-ID`).'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: 'Unauthorized. Codes: `unauthorized` (missing or malformed `Authorization`), `token_invalid` (invalid,
+        expired or revoked access token), `device_mismatch` (`X-Device-ID` differs from the token''s device), `invalid_credentials`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    PaymentRequired:
+      description: 'Subscription enforcement is enabled and the user (or vault owner) is not entitled. Codes: `subscription_required`,
+        `subscription_expired`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: 'Forbidden. Codes: `forbidden`, `vault_access_denied`, `insufficient_role`, `domain_not_allowed`, `email_not_verified`,
+        `limit_reached`, `registration_closed`, `device_revoked`, `public_links_disabled`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: 'Not found. Code: `not_found`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    FeatureDisabled:
+      description: The resource was not found (`not_found`) or the optional feature that gates this route is disabled on this
+        server (`feature_disabled`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: 'Conflict. Codes: `conflict` (file version), `path_exists`, `already_exists`, `key_exists`, `keys_not_set_up`,
+        `group_name_taken`, `email_taken`, `user_exists`, `device_conflict`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Gone:
+      description: 'Gone. Codes: `cursor_expired`, `invite_expired`, `gone`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    LengthRequired:
+      description: 'Upload without `Content-Length`. Code: `length_required`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    PayloadTooLarge:
+      description: 'Payload too large. Codes: `payload_too_large` (JSON body above `limits.max_json_body_bytes`), `file_too_large`,
+        `delta_too_large`, `upload_budget_exceeded`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    TooManyRequests:
+      description: 'Rate limited. Codes: `rate_limited`, `too_many_attempts`, `upload_budget_exceeded`. Wait at least `Retry-After`
+        seconds.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+    InternalError:
+      description: 'Unexpected server error. Code: `internal_error`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ServiceUnavailable:
+      description: 'Temporarily unavailable. Codes: `server_busy` (concurrency cap), `unavailable` (draining). Retry after
+        `Retry-After` seconds.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+    InsufficientStorage:
+      description: 'Vault storage quota exceeded (multi-tenant mode). Code: `quota_exceeded`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotModified:
+      description: Not Modified (`If-None-Match` matched the current `ETag`).
+      headers:
+        ETag:
+          $ref: '#/components/headers/ETag'
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Human readable message. Do not branch on it.
+        code:
+          type: string
+          description: Machine readable code, e.g. `invalid_input`, `unauthorized`, `token_invalid`, `device_mismatch`, `forbidden`,
+            `insufficient_role`, `not_found`, `feature_disabled`, `conflict`, `rate_limited`, `server_busy`, `internal_error`.
+        details:
+          description: Optional extra information.
+      required:
+      - error
+    StatusResponse:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+      - status
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+          enum:
+          - ok
+          - ready
+          - draining
+          - database_unavailable
+          - storage_unavailable
+      required:
+      - status
+    Capabilities:
+      type: object
+      properties:
+        version:
+          type: string
+        tenancy_mode:
+          type: string
+          enum:
+          - single
+          - multi
+        features:
+          type: object
+          properties:
+            collab:
+              type: boolean
+            avatars:
+              type: boolean
+            guests:
+              type: boolean
+            public_links:
+              type: boolean
+            email:
+              type: boolean
+            email_invites:
+              type: boolean
+            email_verification:
+              type: boolean
+            password_reset:
+              type: boolean
+            subscription:
+              type: boolean
+            registration_mode:
+              type: string
+              enum:
+              - open
+              - first-user
+              - closed
+            vault_creation:
+              type: string
+              enum:
+              - everyone
+              - admins
+        limits:
+          type: object
+          properties:
+            max_file_size:
+              type: integer
+              format: int64
+            max_upload_bytes:
+              type: integer
+              format: int64
+            max_json_body_bytes:
+              type: integer
+              format: int64
+            max_delta_bytes:
+              type: integer
+              format: int64
+            avatar_max_bytes:
+              type: integer
+              format: int64
+            batch_max_items:
+              type: integer
+            batch_max_bytes:
+              type: integer
+              format: int64
+            max_concurrent_uploads_per_user:
+              type: integer
+            upload_bytes_per_hour:
+              type: integer
+              format: int64
+            max_event_streams_per_user:
+              type: integer
+            max_collab_sockets_per_user:
+              type: integer
+            default_vault_quota_bytes:
+              type: integer
+              format: int64
+            max_vaults_per_user:
+              type: integer
+            max_devices_per_user:
+              type: integer
+            protection:
+              type: string
+              enum:
+              - 'off'
+              - standard
+              - strict
+          required:
+          - max_file_size
+          - max_upload_bytes
+          - max_json_body_bytes
+          - max_delta_bytes
+          - avatar_max_bytes
+          - batch_max_items
+          - batch_max_bytes
+          - protection
+      required:
+      - version
+      - tenancy_mode
+      - features
+      - limits
+    PreloginRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+      required:
+      - email
+    PreloginResponse:
+      type: object
+      properties:
+        kdf_version:
+          type: integer
+          enum:
+          - 0
+          - 1
+        kdf_salt:
+          type: string
+          format: byte
+          contentEncoding: base64
+          description: '16 bytes; omitted for `kdf_version: 0`.'
+        kdf:
+          type: object
+          properties:
+            algorithm:
+              type: string
+              enum:
+              - argon2id
+            memory_kib:
+              type: integer
+            iterations:
+              type: integer
+            parallelism:
+              type: integer
+      required:
+      - kdf_version
+      - kdf
+    RegisterRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          description: 'Auth key (base64url) for `kdf_version: 1`, raw password for legacy accounts. Min 8 characters.'
+        display_name:
+          type: string
+        locale:
+          type: string
+          enum:
+          - en
+          - pt-BR
+        kdf_salt:
+          type: string
+          format: byte
+          contentEncoding: base64
+        public_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+        encrypted_private_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+        recovery_wrapped_private_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+      required:
+      - email
+      - password
+      - display_name
+    RegisterResponse:
+      type: object
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        display_name:
+          type: string
+      required:
+      - user_id
+      - email
+      - display_name
+    LoginRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+        device_id:
+          type: string
+          format: uuid
+        device_name:
+          type: string
+        device_type:
+          type: string
+      required:
+      - email
+      - password
+      - device_id
+      - device_name
+      - device_type
+    LoginResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: HS256 JWT
+        refresh_token:
+          type: string
+        user_id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        display_name:
+          type: string
+        avatar_url:
+          type: string
+          description: Omitted when unset.
+        email_verified:
+          type: boolean
+        locale:
+          type: string
+        kdf_version:
+          type: integer
+          enum:
+          - 0
+          - 1
+        public_key:
+          type:
+          - string
+          - 'null'
+          contentEncoding: base64
+        encrypted_private_key:
+          type:
+          - string
+          - 'null'
+          contentEncoding: base64
+      required:
+      - access_token
+      - refresh_token
+      - user_id
+      - email
+      - display_name
+      - email_verified
+      - locale
+      - kdf_version
+      - public_key
+      - encrypted_private_key
+    RefreshRequest:
+      type: object
+      properties:
+        refresh_token:
+          type: string
+      required:
+      - refresh_token
+    TokenPair:
+      type: object
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+      required:
+      - access_token
+      - refresh_token
+    LogoutRequest:
+      type: object
+      properties:
+        all_devices:
+          type: boolean
+          default: false
+    Account:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        display_name:
+          type: string
+        locale:
+          type: string
+        avatar_url:
+          type: string
+          description: Relative URL under `/avatars/v1/`; omitted when unset.
+        email_verified:
+          type: boolean
+        has_public_key:
+          type: boolean
+        is_instance_admin:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+      required:
+      - id
+      - email
+      - display_name
+      - locale
+      - email_verified
+      - has_public_key
+      - is_instance_admin
+      - created_at
+    UpdateProfileRequest:
+      type: object
+      properties:
+        display_name:
+          type: string
+        locale:
+          type: string
+          enum:
+          - en
+          - pt-BR
+    ChangePasswordRequest:
+      type: object
+      properties:
+        current_password:
+          type: string
+        new_password:
+          type: string
+        kdf_salt:
+          type: string
+          format: byte
+          contentEncoding: base64
+        encrypted_private_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+      required:
+      - current_password
+      - new_password
+    RequestEmailChangeRequest:
+      type: object
+      properties:
+        password:
+          type: string
+        new_email:
+          type: string
+          format: email
+      required:
+      - password
+      - new_email
+    AccountKeys:
+      type: object
+      properties:
+        kdf_version:
+          type: integer
+          enum:
+          - 0
+          - 1
+        kdf_salt:
+          type:
+          - string
+          - 'null'
+          contentEncoding: base64
+        public_key:
+          type:
+          - string
+          - 'null'
+          contentEncoding: base64
+        encrypted_private_key:
+          type:
+          - string
+          - 'null'
+          contentEncoding: base64
+        has_recovery:
+          type: boolean
+      required:
+      - kdf_version
+      - kdf_salt
+      - public_key
+      - encrypted_private_key
+      - has_recovery
+    SetupKeysRequest:
+      type: object
+      properties:
+        current_password:
+          type: string
+          description: Raw password for kdf 0, auth key for kdf 1.
+        password:
+          type: string
+          description: New auth key.
+        kdf_salt:
+          type: string
+          format: byte
+          contentEncoding: base64
+        public_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+        encrypted_private_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+        recovery_wrapped_private_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+      required:
+      - current_password
+      - password
+      - kdf_salt
+      - public_key
+      - encrypted_private_key
+    RecoveryRequest:
+      type: object
+      properties:
+        recovery_wrapped_private_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+      required:
+      - recovery_wrapped_private_key
+    PublicKeyRequest:
+      type: object
+      properties:
+        public_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+          description: 32-byte X25519 public key.
+      required:
+      - public_key
+    UserPublicKey:
+      type: object
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        public_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+      required:
+      - user_id
+      - public_key
+    TokenRequest:
+      type: object
+      properties:
+        token:
+          type: string
+      required:
+      - token
+    ForgotPasswordRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+      required:
+      - email
+    ResetPrepareRequest:
+      type: object
+      properties:
+        token:
+          type: string
+      required:
+      - token
+    ResetPrepareResponse:
+      type: object
+      properties:
+        public_key:
+          type:
+          - string
+          - 'null'
+          contentEncoding: base64
+        recovery_wrapped_private_key:
+          type:
+          - string
+          - 'null'
+          contentEncoding: base64
+      required:
+      - public_key
+      - recovery_wrapped_private_key
+    ResetPasswordRequest:
+      type: object
+      properties:
+        token:
+          type: string
+        password:
+          type: string
+        kdf_salt:
+          type: string
+          format: byte
+          contentEncoding: base64
+        public_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+        encrypted_private_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+        recovery_wrapped_private_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+      required:
+      - token
+      - password
+    Device:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        device_name:
+          type: string
+        device_type:
+          type: string
+        last_seen_at:
+          type: string
+        created_at:
+          type: string
+        revoked:
+          type: boolean
+        is_current:
+          type: boolean
+          description: Only present (true) for the calling device.
+      required:
+      - id
+      - device_name
+      - device_type
+      - last_seen_at
+      - created_at
+      - revoked
+    UpdateDeviceRequest:
+      type: object
+      properties:
+        device_name:
+          type: string
+      required:
+      - device_name
+    VaultCursor:
+      type: object
+      properties:
+        vault_id:
+          type: string
+          format: uuid
+        last_event_id:
+          type: integer
+          format: int64
+        synced_at:
+          type: string
+          format: date-time
+      required:
+      - vault_id
+      - last_event_id
+      - synced_at
+    OverviewDevice:
+      allOf:
+      - $ref: '#/components/schemas/Device'
+      - type: object
+        properties:
+          vault_cursors:
+            type: array
+            items:
+              $ref: '#/components/schemas/VaultCursor'
+        required:
+        - vault_cursors
+    AccountOverview:
+      type: object
+      properties:
+        account:
+          $ref: '#/components/schemas/Account'
+        devices:
+          type: array
+          items:
+            $ref: '#/components/schemas/OverviewDevice'
+        vaults:
+          type: array
+          items:
+            $ref: '#/components/schemas/Vault'
+        invites:
+          type: array
+          items:
+            $ref: '#/components/schemas/Invite'
+        subscription:
+          $ref: '#/components/schemas/SubscriptionStatus'
+          description: Only when subscriptions are enabled.
+      required:
+      - account
+      - devices
+      - vaults
+      - invites
+    CheckoutRequest:
+      type: object
+      properties:
+        return_url:
+          type: string
+          format: uri
+        completion_url:
+          type: string
+          format: uri
+      required:
+      - return_url
+    CheckoutResponse:
+      type: object
+      properties:
+        checkout_url:
+          type: string
+          format: uri
+      required:
+      - checkout_url
+    SubscriptionStatus:
+      type: object
+      properties:
+        status:
+          type: string
+          enum:
+          - none
+          - active
+          - pending
+          - expired
+          - cancelled
+        entitled:
+          type: boolean
+        current_period_start:
+          type: string
+          format: date-time
+        current_period_end:
+          type: string
+          format: date-time
+        entitlement_expires_at:
+          type: string
+          format: date-time
+        billing_cycle:
+          type: string
+        plan_product_id:
+          type: string
+      required:
+      - status
+      - entitled
+    Vault:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        icon:
+          type: string
+        owner_id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum:
+          - owner
+          - admin
+          - editor
+          - viewer
+          - guest
+        member_count:
+          type: integer
+        has_key:
+          type: boolean
+          description: The caller has a wrapped vault key.
+        allowed_email_domains:
+          type: array
+          items:
+            type: string
+          description: Empty means any domain.
+        allow_guests:
+          type: boolean
+        allow_public_links:
+          type: boolean
+        storage_used_bytes:
+          type: integer
+          format: int64
+        storage_quota_bytes:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: '`null` means unlimited.'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+      - id
+      - name
+      - description
+      - icon
+      - owner_id
+      - role
+      - member_count
+      - has_key
+      - allowed_email_domains
+      - allow_guests
+      - allow_public_links
+      - storage_used_bytes
+      - storage_quota_bytes
+      - created_at
+      - updated_at
+    AcceptedVault:
+      allOf:
+      - $ref: '#/components/schemas/Vault'
+      - type: object
+        properties:
+          encrypted_vault_key:
+            type: string
+            format: byte
+            contentEncoding: base64
+    CreateVaultRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Optional client id for idempotency.
+        name:
+          type: string
+        description:
+          type: string
+        icon:
+          type: string
+        encrypted_vault_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+      required:
+      - name
+    UpdateVaultRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        icon:
+          type: string
+        allowed_email_domains:
+          type: array
+          items:
+            type: string
+        allow_guests:
+          type: boolean
+        allow_public_links:
+          type: boolean
+        storage_quota_bytes:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+    VaultOverview:
+      type: object
+      properties:
+        vault:
+          $ref: '#/components/schemas/Vault'
+        my_role:
+          type: string
+          enum:
+          - owner
+          - admin
+          - editor
+          - viewer
+          - guest
+        my_access:
+          $ref: '#/components/schemas/EffectiveAccess'
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/Member'
+        groups:
+          type: array
+          items:
+            $ref: '#/components/schemas/Group'
+        access_rules:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccessRule'
+          description: Admins and owners only.
+        invites:
+          type: array
+          items:
+            $ref: '#/components/schemas/Invite'
+          description: Admins and owners only; pending, unexpired.
+        devices:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemberDevice'
+        presence:
+          type: array
+          items:
+            $ref: '#/components/schemas/PresencePeer'
+      required:
+      - vault
+      - my_role
+      - my_access
+      - members
+      - groups
+      - devices
+      - presence
+    MemberDevice:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        device_name:
+          type: string
+        device_type:
+          type: string
+        last_seen_at:
+          type: string
+          format: date-time
+        synced_at:
+          type: string
+          format: date-time
+          description: Omitted if the device never synced this vault.
+      required:
+      - id
+      - user_id
+      - device_name
+      - device_type
+      - last_seen_at
+    PresencePeer:
+      type: object
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        file_path:
+          type: string
+        can_write:
+          type: boolean
+      required:
+      - user_id
+      - file_path
+      - can_write
+    EffectiveAccess:
+      type: object
+      properties:
+        all:
+          type: boolean
+        base:
+          type: string
+          enum:
+          - none
+          - view
+          - edit
+        rules:
+          type: array
+          items:
+            type: object
+            properties:
+              path:
+                type: string
+              level:
+                type: string
+                enum:
+                - none
+                - view
+                - edit
+            required:
+            - path
+            - level
+      required:
+      - all
+      - base
+      - rules
+    Member:
+      type: object
+      properties:
+        vault_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        display_name:
+          type: string
+        avatar_url:
+          type: string
+        public_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+          description: X25519 key; omitted when unset.
+        has_key:
+          type: boolean
+        role:
+          type: string
+          enum:
+          - owner
+          - admin
+          - editor
+          - viewer
+          - guest
+        joined_at:
+          type: string
+      required:
+      - vault_id
+      - user_id
+      - email
+      - display_name
+      - has_key
+      - role
+      - joined_at
+    UpdateMemberRoleRequest:
+      type: object
+      properties:
+        role:
+          type: string
+          enum:
+          - admin
+          - editor
+          - viewer
+      required:
+      - role
+    InviteGrant:
+      type: object
+      properties:
+        path:
+          type: string
+        can_write:
+          type: boolean
+      required:
+      - path
+      - can_write
+    Invite:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        vault_id:
+          type: string
+          format: uuid
+        vault_name:
+          type: string
+        inviter_id:
+          type: string
+          format: uuid
+        inviter_name:
+          type: string
+        invitee_email:
+          type: string
+        grants:
+          type: array
+          items:
+            $ref: '#/components/schemas/InviteGrant'
+          description: Guest invites only.
+        role:
+          type: string
+          enum:
+          - admin
+          - editor
+          - viewer
+          - guest
+        encrypted_vault_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+        accepted:
+          type: boolean
+        invite_token:
+          type: string
+          description: Create response only.
+        invite_url:
+          type: string
+          description: Create response only.
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+      required:
+      - id
+      - vault_id
+      - vault_name
+      - inviter_id
+      - invitee_email
+      - role
+      - accepted
+      - expires_at
+      - created_at
+    CreateInviteRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Optional client id for idempotency.
+        invitee_email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum:
+          - admin
+          - editor
+          - viewer
+          - guest
+        grants:
+          type: array
+          items:
+            $ref: '#/components/schemas/InviteGrant'
+          maxItems: 100
+        encrypted_vault_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+      required:
+      - invitee_email
+      - role
+    AcceptInviteRequest:
+      type: object
+      properties:
+        token:
+          type: string
+        invite_id:
+          type: string
+          format: uuid
+      description: Send `token` or `invite_id`.
+    InvitePreview:
+      type: object
+      properties:
+        vault_name:
+          type: string
+        inviter_name:
+          type: string
+        role:
+          type: string
+          enum:
+          - owner
+          - admin
+          - editor
+          - viewer
+          - guest
+        expires_at:
+          type: string
+          format: date-time
+      required:
+      - vault_name
+      - inviter_name
+      - role
+      - expires_at
+    VaultKey:
+      type: object
+      properties:
+        vault_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        encrypted_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+        updated_at:
+          type: string
+          format: date-time
+      required:
+      - vault_id
+      - user_id
+      - encrypted_key
+      - updated_at
+    VaultKeyRequest:
+      type: object
+      properties:
+        encrypted_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+          description: VEK sealed to the member's X25519 public key; non-empty.
+      required:
+      - encrypted_key
+    PendingKey:
+      type: object
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum:
+          - owner
+          - admin
+          - editor
+          - viewer
+          - guest
+        public_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+        display_name:
+          type: string
+        email:
+          type: string
+        avatar_url:
+          type: string
+      required:
+      - user_id
+      - role
+      - display_name
+      - email
+    Group:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        member_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        created_at:
+          type: string
+          format: date-time
+      required:
+      - id
+      - name
+      - member_ids
+      - created_at
+    CreateGroupRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        member_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+      required:
+      - name
+    UpdateGroupRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        member_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Replaces the member list.
+    AccessEntry:
+      type: object
+      properties:
+        principal_type:
+          type: string
+          enum:
+          - user
+          - group
+        principal_id:
+          type: string
+          format: uuid
+        level:
+          type: string
+          enum:
+          - view
+          - edit
+      required:
+      - principal_type
+      - principal_id
+      - level
+    AccessRule:
+      type: object
+      properties:
+        path:
+          type: string
+          description: A path ending in `/` covers a folder; otherwise exactly one file.
+        restricted:
+          type: boolean
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccessEntry'
+      required:
+      - path
+      - restricted
+      - entries
+    VaultEncryption:
+      type: object
+      properties:
+        has_key:
+          type: boolean
+        has_member_keys:
+          type: boolean
+        salt:
+          type: string
+          format: byte
+          contentEncoding: base64
+        encrypted_vek:
+          type: string
+          format: byte
+          contentEncoding: base64
+      required:
+      - has_key
+      - has_member_keys
+    CreateVaultEncryptionRequest:
+      type: object
+      properties:
+        salt:
+          type: string
+          format: byte
+          contentEncoding: base64
+        encrypted_vek:
+          type: string
+          format: byte
+          contentEncoding: base64
+      required:
+      - salt
+      - encrypted_vek
+    FileInfo:
+      type: object
+      properties:
+        vault_id:
+          type: string
+          format: uuid
+        file_path:
+          type: string
+        version:
+          type: integer
+        snapshot_id:
+          type: string
+          format: uuid
+          description: Snapshot upload responses only.
+        checksum:
+          type: string
+        size_bytes:
+          type: integer
+          format: int64
+        content_type:
+          type: string
+        deleted:
+          type: boolean
+        needs_snapshot:
+          type: boolean
+          description: Only present (true) on delta upload responses.
+        last_modified_by:
+          type: string
+          format: uuid
+        last_device_id:
+          type: string
+          format: uuid
+        created_by:
+          type: string
+          format: uuid
+          description: Original author; omitted when unknown.
+        updated_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+      required:
+      - vault_id
+      - file_path
+      - version
+      - checksum
+      - size_bytes
+      - content_type
+      - deleted
+      - last_modified_by
+      - last_device_id
+      - updated_at
+      - created_at
+    UploadDeltaRequest:
+      type: object
+      properties:
+        file_path:
+          type: string
+        base_version:
+          type: integer
+        checksum:
+          type: string
+        size_bytes:
+          type: integer
+          format: int64
+        encrypted_data:
+          type: string
+          format: byte
+          contentEncoding: base64
+      required:
+      - file_path
+      - base_version
+      - checksum
+      - size_bytes
+      - encrypted_data
+    Delta:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        file_path:
+          type: string
+        base_version:
+          type: integer
+        target_version:
+          type: integer
+        encrypted_delta:
+          type: string
+          format: byte
+          contentEncoding: base64
+        size_bytes:
+          type: integer
+          format: int64
+        created_by:
+          type: string
+          format: uuid
+        device_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+      required:
+      - id
+      - file_path
+      - base_version
+      - target_version
+      - encrypted_delta
+      - size_bytes
+      - created_by
+      - device_id
+      - created_at
+    RenameFileRequest:
+      type: object
+      properties:
+        old_path:
+          type: string
+        new_path:
+          type: string
+      required:
+      - old_path
+      - new_path
+    BulkFileInfoRequest:
+      type: object
+      properties:
+        file_paths:
+          type: array
+          items:
+            type: string
+          maxItems: 1000
+      required:
+      - file_paths
+    BatchRequest:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              path:
+                type: string
+                minLength: 1
+              version:
+                type: integer
+                minimum: 0
+                description: '`0` means latest.'
+            required:
+            - path
+            - version
+          minItems: 1
+          maxItems: 200
+      required:
+      - items
+    BatchFrameHeader:
+      type: object
+      properties:
+        path:
+          type: string
+        version:
+          type: integer
+          description: Resolved version when `status` is `ok`.
+        snapshot_version:
+          type: integer
+        status:
+          type: string
+          enum:
+          - ok
+          - not_found
+          - forbidden
+          - error
+        snapshot_id:
+          type: string
+          format: uuid
+        checksum:
+          type: string
+        size_bytes:
+          type: integer
+          format: int64
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+      required:
+      - path
+      - version
+      - status
+      - size_bytes
+      description: JSON header of each frame in an `application/vnd.cortex.batch` response.
+    HistoryEntry:
+      type: object
+      properties:
+        snapshot_id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+        size_bytes:
+          type: integer
+          format: int64
+        checksum:
+          type: string
+        author_id:
+          type: string
+          format: uuid
+        author_name:
+          type: string
+        author_avatar_url:
+          type: string
+        device_id:
+          type: string
+          format: uuid
+        device_name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+      required:
+      - snapshot_id
+      - version
+      - size_bytes
+      - checksum
+      - author_id
+      - author_name
+      - device_id
+      - device_name
+      - created_at
+    SyncEvent:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        vault_id:
+          type: string
+          format: uuid
+        event_type:
+          type: string
+          enum:
+          - file_created
+          - file_updated
+          - file_deleted
+          - file_renamed
+        file_path:
+          type: string
+        version:
+          type: integer
+        actor_id:
+          type: string
+          format: uuid
+        device_id:
+          type: string
+          format: uuid
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+      required:
+      - id
+      - vault_id
+      - event_type
+      - file_path
+      - version
+      - actor_id
+      - device_id
+      - metadata
+      - created_at
+    SyncEventData:
+      type: object
+      properties:
+        vault_uuid:
+          type: string
+          format: uuid
+        file_path:
+          type: string
+        version:
+          type: integer
+        actor_id:
+          type: string
+          format: uuid
+        device_id:
+          type: string
+          format: uuid
+        old_path:
+          type: string
+          description: '`file_renamed` only.'
+        event_type:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+      description: '`data` of SSE file events.'
+    UpdateCursorRequest:
+      type: object
+      properties:
+        last_event_id:
+          type: integer
+          format: int64
+          minimum: 0
+      required:
+      - last_event_id
+    Share:
+      type: object
+      properties:
+        id:
+          type: string
+          description: 22-character base64url id.
+        vault_id:
+          type: string
+          format: uuid
+        file_path:
+          type: string
+        url:
+          type: string
+          format: uri
+        wrapped_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+          description: AES-256-GCM(VEK, link key).
+        revision:
+          type: integer
+        size_bytes:
+          type: integer
+          format: int64
+        expires_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+      - id
+      - vault_id
+      - file_path
+      - url
+      - wrapped_key
+      - revision
+      - size_bytes
+      - expires_at
+      - created_by
+      - created_at
+      - updated_at
+    CreateShareRequest:
+      type: object
+      properties:
+        file_path:
+          type: string
+        wrapped_key:
+          type: string
+          format: byte
+          contentEncoding: base64
+        expires_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+      required:
+      - file_path
+      - wrapped_key
+    UpdateShareRequest:
+      type: object
+      properties:
+        expires_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+    Template:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        vault_id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum:
+          - note
+          - database
+        audience:
+          type: string
+          enum:
+          - team
+          - link
+          - market
+        group_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        group_name:
+          type:
+          - string
+          - 'null'
+        owner_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        owner_name:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        include_samples:
+          type: boolean
+        encrypted:
+          type: boolean
+        version:
+          type: integer
+        file_count:
+          type: integer
+        status:
+          type: string
+          enum:
+          - published
+          - pending_review
+          - rejected
+        review_note:
+          type: string
+        slug:
+          type: string
+        url:
+          type:
+          - string
+          - 'null'
+          description: '`/t/{slug}` for `link` and `market`.'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+      - id
+      - vault_id
+      - kind
+      - audience
+      - group_id
+      - group_name
+      - owner_id
+      - owner_name
+      - name
+      - description
+      - include_samples
+      - encrypted
+      - version
+      - file_count
+      - status
+      - review_note
+      - slug
+      - url
+      - created_at
+      - updated_at
+    CreateTemplateRequest:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum:
+          - note
+          - database
+        audience:
+          type: string
+          enum:
+          - team
+          - link
+          - market
+        group_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        description:
+          type: string
+          maxLength: 2000
+        include_samples:
+          type: boolean
+        payload:
+          type: string
+          format: byte
+          contentEncoding: base64
+        encrypted:
+          type: boolean
+      required:
+      - kind
+      - audience
+      - name
+      - payload
+      - encrypted
+    UpdateTemplateRequest:
+      type: object
+      properties:
+        audience:
+          type: string
+          enum:
+          - team
+          - link
+          - market
+        group_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        include_samples:
+          type: boolean
+        payload:
+          type: string
+          format: byte
+          contentEncoding: base64
+        encrypted:
+          type: boolean
+    ReplaceTemplatePayloadRequest:
+      type: object
+      properties:
+        payload:
+          type: string
+          format: byte
+          contentEncoding: base64
+        encrypted:
+          type: boolean
+      required:
+      - payload
+      - encrypted
+    TemplatePayload:
+      type: object
+      properties:
+        payload:
+          type: string
+          format: byte
+          contentEncoding: base64
+        encrypted:
+          type: boolean
+        version:
+          type: integer
+      required:
+      - payload
+      - encrypted
+      - version
+    PublicTemplate:
+      type: object
+      properties:
+        slug:
+          type: string
+        kind:
+          type: string
+          enum:
+          - note
+          - database
+        name:
+          type: string
+        description:
+          type: string
+        owner_name:
+          type: string
+        version:
+          type: integer
+        updated_at:
+          type: string
+          format: date-time
+        file_count:
+          type: integer
+      required:
+      - slug
+      - kind
+      - name
+      - description
+      - owner_name
+      - version
+      - updated_at
+      - file_count
+    PublicTemplatePayload:
+      type: object
+      properties:
+        template:
+          $ref: '#/components/schemas/PublicTemplate'
+        payload:
+          type: string
+          format: byte
+          contentEncoding: base64
+      required:
+      - template
+      - payload
+    CollabPeer:
+      type: object
+      properties:
+        client_id:
+          type: string
+        user_id:
+          type: string
+          format: uuid
+        display_name:
+          type: string
+        avatar_url:
+          type: string
+        can_write:
+          type: boolean
+      required:
+      - client_id
+      - user_id
+      - display_name
+      - can_write
+    FilePresence:
+      type: object
+      properties:
+        file_path:
+          type: string
+        peers:
+          type: array
+          items:
+            $ref: '#/components/schemas/CollabPeer'
+      required:
+      - file_path
+      - peers
+    CollabPeers:
+      type: object
+      properties:
+        vault_id:
+          type: string
+          format: uuid
+        file_path:
+          type: string
+        peer_count:
+          type: integer
+        peer_ids:
+          type: array
+          items:
+            type: string
+        peers:
+          type: array
+          items:
+            $ref: '#/components/schemas/CollabPeer'
+      required:
+      - vault_id
+      - file_path
+      - peer_count
+      - peer_ids
+      - peers
+    CollabTicketRequest:
+      type: object
+      properties:
+        file_path:
+          type: string
+          minLength: 1
+      required:
+      - file_path
+    CollabTicket:
+      type: object
+      properties:
+        ticket:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+      required:
+      - ticket
+      - expires_at
+    CollabMessage:
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+          - welcome
+          - synced
+          - sync_step1
+          - sync_step2
+          - update
+          - awareness
+          - compact
+          - peer_joined
+          - peer_left
+          - ping
+          - pong
+        data:
+          type: string
+          format: byte
+          contentEncoding: base64
+        up_to:
+          type: integer
+          format: int64
+        v:
+          type: integer
+          description: Protocol version (welcome).
+        client_id:
+          type: string
+        from:
+          $ref: '#/components/schemas/CollabPeer'
+        peer:
+          $ref: '#/components/schemas/CollabPeer'
+        peers:
+          type: array
+          items:
+            $ref: '#/components/schemas/CollabPeer'
+      required:
+      - type
+      description: JSON text frame exchanged on the collab WebSocket.

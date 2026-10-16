@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"strings"
 
 	"github.com/cortexnotes/cortex-sync/internal/domain"
 	"github.com/cortexnotes/cortex-sync/internal/platform/postgres/db"
@@ -126,8 +125,6 @@ func (r *TemplateRepository) ListByVault(ctx context.Context, vaultID uuid.UUID)
 	return templates, nil
 }
 
-var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
-
 func (r *TemplateRepository) ListMarket(ctx context.Context, kind domain.TemplateKind, query string, limit int) ([]domain.TemplateListing, error) {
 	params := db.ListMarketTemplateSharesParams{RowLimit: int32(limit)}
 	if kind != "" {
@@ -135,7 +132,7 @@ func (r *TemplateRepository) ListMarket(ctx context.Context, kind domain.Templat
 		params.Kind = &value
 	}
 	if query != "" {
-		pattern := "%" + likeEscaper.Replace(query) + "%"
+		pattern := "%" + escapeLike(query) + "%"
 		params.Pattern = &pattern
 	}
 	rows, err := r.q(ctx).ListMarketTemplateShares(ctx, params)

@@ -1,9 +1,7 @@
 version: "2"
 sql:
   - engine: postgresql
-    schema:
-      - internal/platform/postgres/sqlc_prelude.sql
-      - migrations
+    schema: migrations
     queries: internal/platform/postgres/queries
     gen:
       go:

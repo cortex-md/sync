@@ -260,14 +260,14 @@ func (r *FileDeltaRepository) ListByFilePath(_ context.Context, vaultID uuid.UUI
 func (r *FileDeltaRepository) DeleteByFilePath(_ context.Context, vaultID uuid.UUID, filePath string, beforeVersion int) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	var count int64
+	var freed int64
 	for id, d := range r.deltas {
 		if d.VaultID == vaultID && d.FilePath == filePath && d.TargetVersion < beforeVersion {
 			delete(r.deltas, id)
-			count++
+			freed += d.SizeBytes
 		}
 	}
-	return count, nil
+	return freed, nil
 }
 
 func (r *FileDeltaRepository) MovePath(_ context.Context, vaultID uuid.UUID, oldPath, newPath string) error {
@@ -377,9 +377,10 @@ func (r *FileLatestRepository) Delete(_ context.Context, vaultID uuid.UUID, file
 }
 
 type SyncEventRepository struct {
-	mu     sync.RWMutex
-	events []domain.SyncEvent
-	nextID int64
+	prunedThrough int64
+	mu            sync.RWMutex
+	events        []domain.SyncEvent
+	nextID        int64
 }
 
 func NewSyncEventRepository() *SyncEventRepository {
@@ -465,12 +466,19 @@ func (r *SyncEventRepository) DeleteOlderThan(_ context.Context, before time.Tim
 	for _, e := range r.events {
 		if e.CreatedAt.Before(before) {
 			count++
+			r.prunedThrough = max(r.prunedThrough, e.ID)
 		} else {
 			kept = append(kept, e)
 		}
 	}
 	r.events = kept
 	return count, nil
+}
+
+func (r *SyncEventRepository) PrunedThrough(_ context.Context) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.prunedThrough, nil
 }
 
 func (r *FileSnapshotRepository) ListByIDs(_ context.Context, vaultID uuid.UUID, ids []uuid.UUID) ([]domain.FileSnapshot, error) {
@@ -480,6 +488,21 @@ func (r *FileSnapshotRepository) ListByIDs(_ context.Context, vaultID uuid.UUID,
 	for _, id := range ids {
 		if s, ok := r.snapshots[id]; ok && s.VaultID == vaultID {
 			result = append(result, *s)
+		}
+	}
+	return result, nil
+}
+
+func (r *SyncEventRepository) ListAfter(_ context.Context, afterID int64, limit int) ([]domain.SyncEvent, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var result []domain.SyncEvent
+	for _, e := range r.events {
+		if e.ID > afterID {
+			result = append(result, e)
+		}
+		if limit > 0 && len(result) >= limit {
+			break
 		}
 	}
 	return result, nil

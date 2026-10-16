@@ -21,8 +21,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./... && go vet -tags "e2e integration" ./...
       - run: go test ./... -race -count=1
-      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
   e2e:
     runs-on: ubuntu-latest
@@ -32,7 +34,17 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: make test-e2e
+      - run: make ENV_FILE=/dev/null test-e2e
+      - name: Postgres integration tests
+        run: make ENV_FILE=/dev/null test-integration
+      - name: Migrations roll back and reapply
+        env:
+          CORTEX_DATABASE_URL: postgres://cortex:cortex@127.0.0.1:5432/cortex_sync?sslmode=disable
+          CORTEX_AUTH_ACCESS_TOKEN_SECRET: ci-secret-that-is-at-least-32-characters
+        run: |
+          go run ./cmd/server migrate down 1
+          go run ./cmd/server migrate up
+          go run ./cmd/server migrate version
 
   image:
     needs: [test, e2e]
@@ -63,3 +75,4 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+

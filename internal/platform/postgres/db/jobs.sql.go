@@ -49,13 +49,22 @@ func (q *Queries) ClaimDueBlobDeletions(ctx context.Context, limit int32) ([]Blo
 }
 
 const claimDueEmails = `-- name: ClaimDueEmails :many
-SELECT id, to_address, template, locale, data, attempts, next_attempt_at, created_at
-FROM email_outbox
-WHERE sent_at IS NULL AND next_attempt_at <= now()
-ORDER BY next_attempt_at
-LIMIT $1
-FOR UPDATE SKIP LOCKED
+UPDATE email_outbox
+SET next_attempt_at = now() + make_interval(secs => $1::int), attempts = attempts + 1
+WHERE id IN (
+    SELECT o.id FROM email_outbox o
+    WHERE o.sent_at IS NULL AND o.failed_at IS NULL AND o.next_attempt_at <= now()
+    ORDER BY o.next_attempt_at
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING id, to_address, template, locale, data, attempts, next_attempt_at, created_at
 `
+
+type ClaimDueEmailsParams struct {
+	LeaseSeconds int32
+	RowLimit     int32
+}
 
 type ClaimDueEmailsRow struct {
 	ID            int64
@@ -68,8 +77,8 @@ type ClaimDueEmailsRow struct {
 	CreatedAt     time.Time
 }
 
-func (q *Queries) ClaimDueEmails(ctx context.Context, limit int32) ([]ClaimDueEmailsRow, error) {
-	rows, err := q.db.Query(ctx, claimDueEmails, limit)
+func (q *Queries) ClaimDueEmails(ctx context.Context, arg ClaimDueEmailsParams) ([]ClaimDueEmailsRow, error) {
+	rows, err := q.db.Query(ctx, claimDueEmails, arg.LeaseSeconds, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -95,6 +104,45 @@ func (q *Queries) ClaimDueEmails(ctx context.Context, limit int32) ([]ClaimDueEm
 		return nil, err
 	}
 	return items, nil
+}
+
+const claimEmail = `-- name: ClaimEmail :one
+UPDATE email_outbox
+SET next_attempt_at = now() + make_interval(secs => $1::int), attempts = attempts + 1
+WHERE id = $2 AND sent_at IS NULL AND failed_at IS NULL AND next_attempt_at <= now()
+RETURNING id, to_address, template, locale, data, attempts, next_attempt_at, created_at
+`
+
+type ClaimEmailParams struct {
+	LeaseSeconds int32
+	ID           int64
+}
+
+type ClaimEmailRow struct {
+	ID            int64
+	ToAddress     string
+	Template      string
+	Locale        string
+	Data          []byte
+	Attempts      int32
+	NextAttemptAt time.Time
+	CreatedAt     time.Time
+}
+
+func (q *Queries) ClaimEmail(ctx context.Context, arg ClaimEmailParams) (ClaimEmailRow, error) {
+	row := q.db.QueryRow(ctx, claimEmail, arg.LeaseSeconds, arg.ID)
+	var i ClaimEmailRow
+	err := row.Scan(
+		&i.ID,
+		&i.ToAddress,
+		&i.Template,
+		&i.Locale,
+		&i.Data,
+		&i.Attempts,
+		&i.NextAttemptAt,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const claimStalePendingBlobs = `-- name: ClaimStalePendingBlobs :many
@@ -141,6 +189,29 @@ func (q *Queries) CompleteBlobDeletion(ctx context.Context, id int64) error {
 	return err
 }
 
+const deleteFinishedEmails = `-- name: DeleteFinishedEmails :execrows
+DELETE FROM email_outbox WHERE id IN (
+    SELECT o.id FROM email_outbox o
+    WHERE (o.sent_at IS NOT NULL AND o.sent_at < $1::timestamptz)
+       OR (o.failed_at IS NOT NULL AND o.failed_at < $2::timestamptz)
+    LIMIT $3
+)
+`
+
+type DeleteFinishedEmailsParams struct {
+	SentBefore time.Time
+	DeadBefore time.Time
+	RowLimit   int32
+}
+
+func (q *Queries) DeleteFinishedEmails(ctx context.Context, arg DeleteFinishedEmailsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteFinishedEmails, arg.SentBefore, arg.DeadBefore, arg.RowLimit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const enqueueBlobDeletion = `-- name: EnqueueBlobDeletion :exec
 INSERT INTO blob_deletions (blob_key) VALUES ($1)
 `
@@ -180,23 +251,37 @@ func (q *Queries) EnqueueEmail(ctx context.Context, arg EnqueueEmailParams) (Enq
 	return i, err
 }
 
-const markEmailFailed = `-- name: MarkEmailFailed :exec
-UPDATE email_outbox SET attempts = attempts + 1, last_error = $1, next_attempt_at = $2 WHERE id = $3
+const markEmailDead = `-- name: MarkEmailDead :exec
+UPDATE email_outbox SET last_error = $1, failed_at = now() WHERE id = $2
 `
 
-type MarkEmailFailedParams struct {
+type MarkEmailDeadParams struct {
+	LastError string
+	ID        int64
+}
+
+func (q *Queries) MarkEmailDead(ctx context.Context, arg MarkEmailDeadParams) error {
+	_, err := q.db.Exec(ctx, markEmailDead, arg.LastError, arg.ID)
+	return err
+}
+
+const markEmailRetry = `-- name: MarkEmailRetry :exec
+UPDATE email_outbox SET last_error = $1, next_attempt_at = $2 WHERE id = $3
+`
+
+type MarkEmailRetryParams struct {
 	LastError     string
 	NextAttemptAt time.Time
 	ID            int64
 }
 
-func (q *Queries) MarkEmailFailed(ctx context.Context, arg MarkEmailFailedParams) error {
-	_, err := q.db.Exec(ctx, markEmailFailed, arg.LastError, arg.NextAttemptAt, arg.ID)
+func (q *Queries) MarkEmailRetry(ctx context.Context, arg MarkEmailRetryParams) error {
+	_, err := q.db.Exec(ctx, markEmailRetry, arg.LastError, arg.NextAttemptAt, arg.ID)
 	return err
 }
 
 const markEmailSent = `-- name: MarkEmailSent :exec
-UPDATE email_outbox SET sent_at = now(), attempts = attempts + 1, last_error = '' WHERE id = $1
+UPDATE email_outbox SET sent_at = now(), last_error = '' WHERE id = $1
 `
 
 func (q *Queries) MarkEmailSent(ctx context.Context, id int64) error {

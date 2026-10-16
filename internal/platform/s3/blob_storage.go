@@ -56,9 +56,14 @@ func (s *BlobStorage) Check(ctx context.Context) error {
 	return nil
 }
 
+const uploadPartSize = 8 << 20
+
 func (s *BlobStorage) Upload(ctx context.Context, key string, reader io.Reader, size int64, contentType string) (int64, error) {
-	opts := minio.PutObjectOptions{ContentType: contentType}
-	info, err := s.client.PutObject(ctx, s.bucket, key, reader, size, opts)
+	if size < 0 {
+		return 0, fmt.Errorf("blob upload requires a known size")
+	}
+	opts := minio.PutObjectOptions{ContentType: contentType, PartSize: uploadPartSize}
+	info, err := s.client.PutObject(ctx, s.bucket, key, io.LimitReader(reader, size), size, opts)
 	if err != nil {
 		return 0, err
 	}

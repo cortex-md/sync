@@ -31,12 +31,13 @@ type cacheEntry struct {
 }
 
 type Authorizer struct {
-	members    Members
-	cached     bool
-	mu         sync.RWMutex
-	entries    map[uuid.UUID]map[uuid.UUID]cacheEntry
-	size       int
-	generation uint64
+	guestsAllowed func(ctx context.Context, vaultID uuid.UUID) (bool, error)
+	members       Members
+	cached        bool
+	mu            sync.RWMutex
+	entries       map[uuid.UUID]map[uuid.UUID]cacheEntry
+	size          int
+	generation    uint64
 }
 
 func New(members Members) *Authorizer {
@@ -62,6 +63,14 @@ func (a *Authorizer) Invalidate(vaultID, userID uuid.UUID) {
 			delete(a.entries, vaultID)
 		}
 	}
+	a.mu.Unlock()
+}
+
+func (a *Authorizer) InvalidateAll() {
+	a.mu.Lock()
+	a.generation++
+	a.entries = make(map[uuid.UUID]map[uuid.UUID]cacheEntry)
+	a.size = 0
 	a.mu.Unlock()
 }
 
@@ -138,6 +147,15 @@ func (a *Authorizer) load(ctx context.Context, vaultID, userID uuid.UUID) (Acces
 		if err != nil {
 			return Access{}, err
 		}
+		if member.Role == domain.VaultRoleGuest && a.guestsAllowed != nil {
+			allowed, err := a.guestsAllowed(ctx, vaultID)
+			if err != nil {
+				return Access{}, err
+			}
+			if !allowed {
+				rules = nil
+			}
+		}
 		access.Scope = domain.CompileScope(member.Role, rules)
 	}
 
@@ -166,4 +184,9 @@ func (a *Authorizer) store(vaultID, userID uuid.UUID, access Access, generation 
 		a.size++
 	}
 	users[userID] = cacheEntry{access: access, expiresAt: time.Now().Add(cacheTTL)}
+}
+
+func (a *Authorizer) WithGuestPolicy(allowed func(ctx context.Context, vaultID uuid.UUID) (bool, error)) *Authorizer {
+	a.guestsAllowed = allowed
+	return a
 }

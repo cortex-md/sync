@@ -25,9 +25,9 @@ services:
       - "8080:8080"
     environment:
       CORTEX_SERVER_ENV: ${CORTEX_SERVER_ENV:-development}
+      CORTEX_DEPLOYMENT: cluster
+      CORTEX_PROTECTION: ${CORTEX_PROTECTION:-standard}
       CORTEX_DATABASE_URL: postgres://cortex:cortex@postgres:5432/cortex_sync?sslmode=disable
-      CORTEX_DATABASE_MAX_CONNS: 10
-      CORTEX_DATABASE_MIN_CONNS: 2
       CORTEX_STORAGE_BACKEND: local
       CORTEX_STORAGE_ENDPOINT: s3:8333
       CORTEX_STORAGE_ACCESS_KEY: minioadmin
@@ -47,13 +47,9 @@ services:
       CORTEX_SERVER_PUBLIC_URL: ${CORTEX_SERVER_PUBLIC_URL:-http://localhost:8080}
       CORTEX_TENANCY_MODE: ${CORTEX_TENANCY_MODE:-single}
       CORTEX_VAULT_CREATION: ${CORTEX_VAULT_CREATION:-everyone}
-      CORTEX_FEATURE_COLLAB: ${CORTEX_FEATURE_COLLAB:-true}
-      CORTEX_FEATURE_AVATARS: ${CORTEX_FEATURE_AVATARS:-true}
-      CORTEX_FEATURE_GUESTS: ${CORTEX_FEATURE_GUESTS:-true}
-      CORTEX_FEATURE_PUBLIC_LINKS: ${CORTEX_FEATURE_PUBLIC_LINKS:-true}
-      CORTEX_FEATURE_EMAIL_VERIFICATION: ${CORTEX_FEATURE_EMAIL_VERIFICATION:-auto}
-      CORTEX_FEATURE_PASSWORD_RESET: ${CORTEX_FEATURE_PASSWORD_RESET:-auto}
+      CORTEX_FEATURES: ${CORTEX_FEATURES:-collab,avatars,guests,public_links}
       CORTEX_MAIL_DRIVER: ${CORTEX_MAIL_DRIVER:-log}
+      CORTEX_MAIL_RESEND_API_KEY: ${CORTEX_MAIL_RESEND_API_KEY:-}
       CORTEX_MAIL_HOST: ${CORTEX_MAIL_HOST:-}
       CORTEX_MAIL_PORT: ${CORTEX_MAIL_PORT:-587}
       CORTEX_MAIL_USERNAME: ${CORTEX_MAIL_USERNAME:-}
@@ -70,16 +66,6 @@ services:
         condition: service_healthy
     mem_limit: 256m
     cpus: "0.50"
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "wget",
-          "--no-verbose",
-          "--tries=1",
-          "--spider",
-          "http://localhost:8080/ready",
-        ]
   postgres:
     container_name: cortex-postgres
     image: postgres:16-alpine

@@ -23,11 +23,21 @@ type Set struct {
 }
 
 type Limits struct {
-	MaxFileSize    int64 `json:"max_file_size"`
-	MaxUploadBytes int64 `json:"max_upload_bytes"`
-	AvatarMaxBytes int64 `json:"avatar_max_bytes"`
-	BatchMaxItems  int   `json:"batch_max_items"`
-	BatchMaxBytes  int64 `json:"batch_max_bytes"`
+	MaxFileSize             int64  `json:"max_file_size"`
+	MaxUploadBytes          int64  `json:"max_upload_bytes"`
+	MaxJSONBodyBytes        int64  `json:"max_json_body_bytes"`
+	MaxDeltaBytes           int64  `json:"max_delta_bytes"`
+	AvatarMaxBytes          int64  `json:"avatar_max_bytes"`
+	BatchMaxItems           int    `json:"batch_max_items"`
+	BatchMaxBytes           int64  `json:"batch_max_bytes"`
+	MaxConcurrentUploads    int    `json:"max_concurrent_uploads_per_user,omitempty"`
+	UploadBytesPerHour      int64  `json:"upload_bytes_per_hour,omitempty"`
+	MaxEventStreamsPerUser  int    `json:"max_event_streams_per_user,omitempty"`
+	MaxCollabSocketsPerUser int    `json:"max_collab_sockets_per_user,omitempty"`
+	VaultQuotaBytes         int64  `json:"default_vault_quota_bytes,omitempty"`
+	MaxVaultsPerUser        int    `json:"max_vaults_per_user,omitempty"`
+	MaxDevicesPerUser       int    `json:"max_devices_per_user,omitempty"`
+	Protection              string `json:"protection"`
 }
 
 func FromConfig(cfg *config.Config) Set {
@@ -79,6 +89,7 @@ func CapabilitiesHandler(set Set, limits Limits, version string) http.HandlerFun
 			"guests":             set.Guests,
 			"public_links":       set.PublicLinks,
 			"email":              set.Mail,
+			"email_invites":      set.Mail,
 			"email_verification": set.EmailVerification,
 			"password_reset":     set.PasswordReset,
 			"subscription":       set.Subscription,

@@ -80,8 +80,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req createVaultRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
+	if !httpx.DecodeJSON(w, r, &req) {
 		return
 	}
 
@@ -201,8 +200,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req updateVaultRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
+	if !httpx.DecodeJSON(w, r, &req) {
 		return
 	}
 
@@ -255,17 +253,17 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 func handleVaultError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, domain.ErrInvalidInput):
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		httpx.WriteErrorWithCode(w, http.StatusBadRequest, "invalid input", "invalid_input")
 	case errors.Is(err, domain.ErrNotFound):
-		httpx.WriteError(w, http.StatusNotFound, "not found")
+		httpx.WriteErrorWithCode(w, http.StatusNotFound, "not found", "not_found")
 	case errors.Is(err, domain.ErrVaultAccessDenied):
-		httpx.WriteError(w, http.StatusForbidden, "vault access denied")
+		httpx.WriteErrorWithCode(w, http.StatusForbidden, "vault access denied", "vault_access_denied")
 	case errors.Is(err, domain.ErrInsufficientRole):
 		httpx.WriteErrorWithCode(w, http.StatusForbidden, "insufficient permissions", "insufficient_role")
 	case errors.Is(err, domain.ErrGroupNameTaken):
 		httpx.WriteErrorWithCode(w, http.StatusConflict, "a group with this name already exists", "group_name_taken")
 	case errors.Is(err, domain.ErrAlreadyExists):
-		httpx.WriteError(w, http.StatusConflict, "already exists")
+		httpx.WriteErrorWithCode(w, http.StatusConflict, "already exists", "already_exists")
 	case errors.Is(err, domain.ErrInviteExpired):
 		httpx.WriteErrorWithCode(w, http.StatusGone, "invite has expired", "invite_expired")
 	case errors.Is(err, domain.ErrFeatureDisabled):
@@ -273,7 +271,10 @@ func handleVaultError(w http.ResponseWriter, err error) {
 	case errors.Is(err, domain.ErrDomainNotAllowed):
 		httpx.WriteErrorWithCode(w, http.StatusForbidden, "email domain is not allowed in this vault", "domain_not_allowed")
 	default:
+		if httpx.WriteDomainError(w, err) {
+			return
+		}
 		log.Error().Err(err).Msg("vault request failed")
-		httpx.WriteError(w, http.StatusInternalServerError, "internal server error")
+		httpx.WriteInternalError(w)
 	}
 }

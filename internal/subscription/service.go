@@ -15,6 +15,7 @@ import (
 const defaultSubscriptionRenewalGrace = 48 * time.Hour
 
 type Service struct {
+	tx            Transactor
 	subs          SubscriptionRepository
 	gateway       Gateway
 	users         UserRepository
@@ -32,6 +33,11 @@ type Deps struct {
 	PlanProduct   string
 	RenewalGrace  time.Duration
 	DevOps        devops.Notifier
+	Tx            Transactor
+}
+
+type Transactor interface {
+	RunInTx(ctx context.Context, fn func(ctx context.Context) error) error
 }
 
 func NewService(d Deps) *Service {
@@ -40,6 +46,7 @@ func NewService(d Deps) *Service {
 		renewalGrace = defaultSubscriptionRenewalGrace
 	}
 	return &Service{
+		tx:           d.Tx,
 		subs:         d.Subscriptions,
 		gateway:      d.Gateway,
 		users:        d.Users,
@@ -222,47 +229,64 @@ func (uc *Service) HandleWebhook(ctx context.Context, input SubscriptionWebhookI
 	}
 
 	now := uc.now()
-	event := &domain.SubscriptionWebhookEvent{
-		ID:        input.EventID,
-		EventType: input.Event,
-		CreatedAt: now,
-	}
-	if err := uc.subs.CreateWebhookEvent(ctx, event); err != nil {
-		if errors.Is(err, domain.ErrAlreadyExists) {
-			return &SubscriptionWebhookOutput{Processed: false}, nil
-		}
-		return nil, err
-	}
-
-	sub, err := uc.findSubscriptionForWebhook(ctx, input)
-	if err != nil {
-		if errors.Is(err, domain.ErrNotFound) {
-			if err := uc.subs.MarkWebhookEventProcessed(ctx, input.EventID, now); err != nil {
-				return nil, err
+	var (
+		output  *SubscriptionWebhookOutput
+		applied *domain.Subscription
+	)
+	err := uc.runInTx(ctx, func(ctx context.Context) error {
+		event := &domain.SubscriptionWebhookEvent{ID: input.EventID, EventType: input.Event, CreatedAt: now}
+		if err := uc.subs.CreateWebhookEvent(ctx, event); err != nil {
+			if errors.Is(err, domain.ErrAlreadyExists) {
+				output = &SubscriptionWebhookOutput{Processed: false}
+				return nil
 			}
-			return &SubscriptionWebhookOutput{Processed: true}, nil
+			return err
 		}
-		_ = uc.subs.DeleteWebhookEvent(ctx, input.EventID)
+
+		sub, err := uc.findSubscriptionForWebhook(ctx, input)
+		if errors.Is(err, domain.ErrNotFound) {
+			output = &SubscriptionWebhookOutput{Processed: true}
+			return uc.subs.MarkWebhookEventProcessed(ctx, input.EventID, now)
+		}
+		if err != nil {
+			return err
+		}
+
+		if stale := !input.OccurredAt.IsZero() && input.OccurredAt.Before(sub.LastEventAt); stale {
+			output = &SubscriptionWebhookOutput{Processed: false, UserID: sub.UserID}
+			return uc.subs.MarkWebhookEventProcessed(ctx, input.EventID, now)
+		}
+		if err := uc.applyWebhook(sub, input); err != nil {
+			return err
+		}
+		if !input.OccurredAt.IsZero() {
+			sub.LastEventAt = input.OccurredAt
+		}
+		sub.UpdatedAt = now
+		if err := uc.subs.Update(ctx, sub); err != nil {
+			return err
+		}
+		if err := uc.subs.MarkWebhookEventProcessed(ctx, input.EventID, now); err != nil {
+			return err
+		}
+		applied = sub
+		output = &SubscriptionWebhookOutput{Processed: true, UserID: sub.UserID}
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
-
-	if err := uc.applyWebhook(sub, input); err != nil {
-		_ = uc.subs.DeleteWebhookEvent(ctx, input.EventID)
-		return nil, err
+	if applied != nil {
+		uc.notifySubscriptionWebhook(ctx, applied, input, now)
 	}
-	sub.UpdatedAt = now
+	return output, nil
+}
 
-	if err := uc.subs.Update(ctx, sub); err != nil {
-		_ = uc.subs.DeleteWebhookEvent(ctx, input.EventID)
-		return nil, err
+func (uc *Service) runInTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	if uc.tx == nil {
+		return fn(ctx)
 	}
-	if err := uc.subs.MarkWebhookEventProcessed(ctx, input.EventID, now); err != nil {
-		return nil, err
-	}
-
-	uc.notifySubscriptionWebhook(ctx, sub, input, now)
-
-	return &SubscriptionWebhookOutput{Processed: true, UserID: sub.UserID}, nil
+	return uc.tx.RunInTx(ctx, fn)
 }
 
 func (uc *Service) GetStatus(ctx context.Context, userID uuid.UUID) (*domain.Subscription, error) {

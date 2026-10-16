@@ -25,6 +25,7 @@ type UserRepository interface {
 type VaultRepository interface {
 	Create(ctx context.Context, vault *domain.Vault) error
 	GetByID(ctx context.Context, id uuid.UUID) (*domain.Vault, error)
+	GetForUpdate(ctx context.Context, id uuid.UUID) (*domain.Vault, error)
 	ListSummariesForUser(ctx context.Context, userID uuid.UUID) ([]domain.VaultSummary, error)
 	GetSummaryForUser(ctx context.Context, vaultID, userID uuid.UUID) (*domain.VaultSummary, error)
 	Update(ctx context.Context, vault *domain.Vault) error

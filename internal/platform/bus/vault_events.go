@@ -23,7 +23,7 @@ func PublishSignal(ctx context.Context, publisher Bus, signal Signal) {
 	if publisher == nil {
 		return
 	}
-	if err := publisher.Publish(ctx, signal); err != nil {
+	if err := publisher.Publish(context.WithoutCancel(ctx), signal); err != nil {
 		log.Warn().Err(err).Str("kind", signal.Kind).Msg("failed to publish signal")
 	}
 }

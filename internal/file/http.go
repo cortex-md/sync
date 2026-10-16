@@ -2,7 +2,6 @@ package file
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -76,6 +75,9 @@ func (h *Handler) UploadSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	checksum := r.Header.Get("X-Local-Hash")
+	if checksum == "" {
+		checksum = r.Header.Get("X-Checksum")
+	}
 	contentType := r.Header.Get("X-Content-Type")
 	if contentType == "" {
 		contentType = "application/octet-stream"
@@ -99,7 +101,11 @@ func (h *Handler) UploadSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpx.WriteJSON(w, http.StatusCreated, toFileInfoResponse(info))
+	status := http.StatusCreated
+	if info.Unchanged {
+		status = http.StatusOK
+	}
+	httpx.WriteJSON(w, status, toFileInfoResponse(info))
 }
 
 type uploadDeltaRequest struct {
@@ -126,8 +132,7 @@ func (h *Handler) UploadDelta(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req uploadDeltaRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
+	if !httpx.DecodeJSON(w, r, &req) {
 		return
 	}
 
@@ -199,9 +204,21 @@ func (h *Handler) DownloadSnapshot(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Size-Bytes", strconv.FormatInt(result.Snapshot.SizeBytes, 10))
 	w.Header().Set("X-Created-By", result.Snapshot.CreatedBy.String())
 	w.Header().Set("X-Device-ID", result.Snapshot.DeviceID.String())
+	w.Header().Set("X-Author-Device-ID", result.Snapshot.DeviceID.String())
 	w.Header().Set("X-Snapshot-ID", result.Snapshot.ID.String())
+	etag := `"` + result.Snapshot.ID.String() + `"`
+	w.Header().Set("ETag", etag)
+	if version > 0 {
+		w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "private, no-cache")
+	}
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
-	io.Copy(w, result.Reader)
+	_, _ = io.Copy(w, result.Reader)
 }
 
 type deltaResponse struct {
@@ -382,8 +399,7 @@ func (h *Handler) RenameFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req renameFileRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
+	if !httpx.DecodeJSON(w, r, &req) {
 		return
 	}
 
@@ -617,6 +633,10 @@ func (h *Handler) ListChanges(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	w.Header().Set("X-Has-More", strconv.FormatBool(result.HasMore))
+	if n := len(result.Events); n > 0 {
+		w.Header().Set("X-Next-Cursor", strconv.FormatInt(result.Events[n-1].ID, 10))
+	}
 	httpx.WriteJSON(w, http.StatusOK, resp)
 }
 
@@ -679,8 +699,7 @@ func (h *Handler) BulkGetFileInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req bulkGetFileInfoRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
+	if !httpx.DecodeJSON(w, r, &req) {
 		return
 	}
 
@@ -714,29 +733,36 @@ func (h *Handler) BulkGetFileInfo(w http.ResponseWriter, r *http.Request) {
 func handleFileError(w http.ResponseWriter, err error) {
 	var maxBytesError *http.MaxBytesError
 	if errors.As(err, &maxBytesError) {
-		httpx.WriteError(w, http.StatusRequestEntityTooLarge, "request body too large")
+		httpx.WriteErrorWithCode(w, http.StatusRequestEntityTooLarge, "request body too large", "file_too_large")
 		return
 	}
 
 	switch {
 	case errors.Is(err, domain.ErrInvalidInput):
-		httpx.WriteError(w, http.StatusBadRequest, domain.ErrInvalidInput.Error())
+		httpx.WriteErrorWithCode(w, http.StatusBadRequest, domain.ErrInvalidInput.Error(), "invalid_input")
 	case errors.Is(err, domain.ErrNotFound):
-		httpx.WriteError(w, http.StatusNotFound, "not found")
+		httpx.WriteErrorWithCode(w, http.StatusNotFound, "not found", "not_found")
 	case errors.Is(err, domain.ErrVaultAccessDenied):
-		httpx.WriteError(w, http.StatusForbidden, "vault access denied")
+		httpx.WriteErrorWithCode(w, http.StatusForbidden, "vault access denied", "vault_access_denied")
 	case errors.Is(err, domain.ErrInsufficientRole):
 		httpx.WriteErrorWithCode(w, http.StatusForbidden, "insufficient permissions", "insufficient_role")
 	case errors.Is(err, domain.ErrConflict):
 		httpx.WriteErrorWithCode(w, http.StatusConflict, "version conflict", "conflict")
 	case errors.Is(err, domain.ErrAlreadyExists):
-		httpx.WriteError(w, http.StatusConflict, "already exists")
+		httpx.WriteErrorWithCode(w, http.StatusConflict, "already exists", "path_exists")
 	case errors.Is(err, domain.ErrFileTooLarge):
-		httpx.WriteError(w, http.StatusRequestEntityTooLarge, "file too large")
+		httpx.WriteErrorWithCode(w, http.StatusRequestEntityTooLarge, "file too large", "file_too_large")
+	case errors.Is(err, domain.ErrDeltaTooLarge):
+		httpx.WriteErrorWithCode(w, http.StatusRequestEntityTooLarge, "delta too large, upload a snapshot instead", "delta_too_large")
 	case errors.Is(err, domain.ErrQuotaExceeded):
 		httpx.WriteErrorWithCode(w, http.StatusInsufficientStorage, "vault storage quota exceeded", "quota_exceeded")
+	case errors.Is(err, domain.ErrCursorExpired):
+		httpx.WriteErrorWithCode(w, http.StatusGone, "cursor is older than the retained history, run a full resync", "cursor_expired")
 	default:
+		if httpx.WriteDomainError(w, err) {
+			return
+		}
 		log.Error().Err(err).Msg("file request failed")
-		httpx.WriteError(w, http.StatusInternalServerError, "internal server error")
+		httpx.WriteInternalError(w)
 	}
 }

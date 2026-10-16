@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/cortexnotes/cortex-sync/internal/platform/txhook"
 	"github.com/google/uuid"
 )
 
@@ -12,6 +13,7 @@ const (
 	KindAccessChanged      = "access"
 	KindVaultAccessChanged = "vault_access"
 	KindCollab             = "collab"
+	KindTokensRevoked      = "tokens_revoked"
 )
 
 type Signal struct {
@@ -67,8 +69,8 @@ func (m *Memory) InstanceID() string {
 	return m.id
 }
 
-func (m *Memory) Publish(_ context.Context, signal Signal) error {
+func (m *Memory) Publish(ctx context.Context, signal Signal) error {
 	signal.Origin = m.id
-	m.Dispatch(signal)
+	txhook.AfterCommit(ctx, func() { m.Dispatch(signal) })
 	return nil
 }

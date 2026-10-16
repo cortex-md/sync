@@ -1,7 +1,6 @@
 package device
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -132,8 +131,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req updateDeviceRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
+	if !httpx.DecodeJSON(w, r, &req) {
 		return
 	}
 
@@ -153,12 +151,15 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 func handleDeviceError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, domain.ErrNotFound):
-		httpx.WriteError(w, http.StatusNotFound, "device not found")
+		httpx.WriteErrorWithCode(w, http.StatusNotFound, "device not found", "not_found")
 	case errors.Is(err, domain.ErrInvalidInput):
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		httpx.WriteErrorWithCode(w, http.StatusBadRequest, "invalid input", "invalid_input")
 	case errors.Is(err, domain.ErrDeviceRevoked):
 		httpx.WriteErrorWithCode(w, http.StatusForbidden, "device has been revoked", "device_revoked")
 	default:
-		httpx.WriteError(w, http.StatusInternalServerError, "internal server error")
+		if httpx.WriteDomainError(w, err) {
+			return
+		}
+		httpx.WriteInternalError(w)
 	}
 }

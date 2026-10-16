@@ -36,7 +36,7 @@ func AuthMiddleware(tokens TokenValidator) func(http.Handler) http.Handler {
 
 			claims, err := tokens.ValidateAccessToken(parts[1])
 			if err != nil {
-				WriteError(w, http.StatusUnauthorized, "invalid or expired token")
+				WriteErrorWithCode(w, http.StatusUnauthorized, "invalid or expired token", "token_invalid")
 				return
 			}
 

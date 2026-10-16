@@ -3,6 +3,7 @@ package vault
 import (
 	"context"
 	"errors"
+	"github.com/cortexnotes/cortex-sync/internal/platform/bus"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ const (
 )
 
 type Service struct {
+	bus            bus.Bus
 	vaults         VaultRepository
 	members        VaultMemberRepository
 	keys           VaultKeyRepository
@@ -28,6 +30,8 @@ type Service struct {
 	authz          *authz.Authorizer
 	creationPolicy string
 	quotaManaged   bool
+	defaultQuota   int64
+	maxOwnedVaults int
 }
 
 type Deps struct {
@@ -43,6 +47,9 @@ type Deps struct {
 	Authz          *authz.Authorizer
 	CreationPolicy string
 	QuotaManaged   bool
+	DefaultQuota   int64
+	MaxOwnedVaults int
+	Bus            bus.Bus
 }
 
 func NewService(d Deps) *Service {
@@ -66,6 +73,9 @@ func NewService(d Deps) *Service {
 		authz:          authorizer,
 		creationPolicy: policy,
 		quotaManaged:   d.QuotaManaged,
+		defaultQuota:   d.DefaultQuota,
+		maxOwnedVaults: d.MaxOwnedVaults,
+		bus:            d.Bus,
 	}
 }
 
@@ -133,6 +143,9 @@ func (uc *Service) Create(ctx context.Context, input CreateVaultInput) (*VaultIn
 	if err := uc.checkCreationPolicy(ctx, input.UserID); err != nil {
 		return nil, err
 	}
+	if err := uc.checkOwnedVaultLimit(ctx, input.UserID, input.ID); err != nil {
+		return nil, err
+	}
 
 	now := time.Now()
 	vault := &domain.Vault{
@@ -148,6 +161,10 @@ func (uc *Service) Create(ctx context.Context, input CreateVaultInput) (*VaultIn
 	}
 	if vault.ID == uuid.Nil {
 		vault.ID = uuid.New()
+	}
+	if uc.defaultQuota > 0 {
+		quota := uc.defaultQuota
+		vault.StorageQuotaBytes = &quota
 	}
 
 	err := uc.tx.RunInTx(ctx, func(ctx context.Context) error {
@@ -191,6 +208,29 @@ func (uc *Service) Create(ctx context.Context, input CreateVaultInput) (*VaultIn
 	info.MemberCount = 1
 	info.HasKey = len(input.EncryptedVaultKey) > 0
 	return info, nil
+}
+
+func (uc *Service) checkOwnedVaultLimit(ctx context.Context, userID uuid.UUID, requestedID uuid.UUID) error {
+	if uc.maxOwnedVaults <= 0 {
+		return nil
+	}
+	summaries, err := uc.vaults.ListSummariesForUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	owned := 0
+	for i := range summaries {
+		if requestedID != uuid.Nil && summaries[i].Vault.ID == requestedID {
+			return nil
+		}
+		if summaries[i].Role == domain.VaultRoleOwner {
+			owned++
+		}
+	}
+	if owned >= uc.maxOwnedVaults {
+		return domain.ErrLimitReached
+	}
+	return nil
 }
 
 func (uc *Service) checkCreationPolicy(ctx context.Context, userID uuid.UUID) error {
@@ -248,11 +288,38 @@ func (uc *Service) Update(ctx context.Context, input UpdateVaultInput) (*VaultIn
 		return nil, err
 	}
 
-	vault, err := uc.vaults.GetByID(ctx, input.VaultID)
+	if input.StorageQuotaBytes != nil {
+		if !uc.quotaManaged {
+			return nil, domain.ErrInvalidInput
+		}
+		if err := uc.requireInstanceAdmin(ctx, input.UserID); err != nil {
+			return nil, err
+		}
+	}
+
+	guestsChanged := false
+	err = uc.tx.RunInTx(ctx, func(ctx context.Context) error {
+		vault, err := uc.vaults.GetForUpdate(ctx, input.VaultID)
+		if err != nil {
+			return err
+		}
+		guestsChanged, err = applyVaultUpdate(vault, input)
+		if err != nil {
+			return err
+		}
+		return uc.vaults.Update(ctx, vault)
+	})
 	if err != nil {
 		return nil, err
 	}
+	if guestsChanged {
+		uc.authz.InvalidateVault(input.VaultID)
+		bus.PublishVaultAccessChanged(ctx, uc.bus, input.VaultID)
+	}
+	return loadVaultInfo(ctx, uc.vaults, input.VaultID, input.UserID)
+}
 
+func applyVaultUpdate(vault *domain.Vault, input UpdateVaultInput) (bool, error) {
 	if name := strings.TrimSpace(input.Name); name != "" {
 		vault.Name = name
 	}
@@ -265,31 +332,23 @@ func (uc *Service) Update(ctx context.Context, input UpdateVaultInput) (*VaultIn
 	if input.AllowedEmailDomains != nil {
 		domains, ok := normalizeDomains(*input.AllowedEmailDomains)
 		if !ok {
-			return nil, domain.ErrInvalidInput
+			return false, domain.ErrInvalidInput
 		}
 		vault.AllowedEmailDomains = domains
 	}
+	guestsChanged := false
 	if input.AllowGuests != nil {
+		guestsChanged = vault.AllowGuests != *input.AllowGuests
 		vault.AllowGuests = *input.AllowGuests
 	}
 	if input.AllowPublicLinks != nil {
 		vault.AllowPublicLinks = *input.AllowPublicLinks
 	}
 	if input.StorageQuotaBytes != nil {
-		if !uc.quotaManaged {
-			return nil, domain.ErrInvalidInput
-		}
-		if err := uc.requireInstanceAdmin(ctx, input.UserID); err != nil {
-			return nil, err
-		}
 		vault.StorageQuotaBytes = *input.StorageQuotaBytes
 	}
 	vault.UpdatedAt = time.Now()
-
-	if err := uc.vaults.Update(ctx, vault); err != nil {
-		return nil, err
-	}
-	return loadVaultInfo(ctx, uc.vaults, input.VaultID, input.UserID)
+	return guestsChanged, nil
 }
 
 func (uc *Service) requireInstanceAdmin(ctx context.Context, userID uuid.UUID) error {
@@ -347,7 +406,12 @@ func (uc *Service) Delete(ctx context.Context, userID uuid.UUID, vaultID uuid.UU
 		return err
 	}
 
-	return uc.tx.RunInTx(ctx, func(ctx context.Context) error {
+	members, err := uc.members.ListByVaultID(ctx, vaultID)
+	if err != nil {
+		return err
+	}
+
+	err = uc.tx.RunInTx(ctx, func(ctx context.Context) error {
 		if uc.snapshots != nil && uc.blobQueue != nil {
 			keys, err := uc.snapshots.ListBlobKeysByVault(ctx, vaultID)
 			if err != nil {
@@ -366,4 +430,15 @@ func (uc *Service) Delete(ctx context.Context, userID uuid.UUID, vaultID uuid.UU
 		}
 		return uc.vaults.Delete(ctx, vaultID)
 	})
+	if err != nil {
+		return err
+	}
+
+	uc.authz.InvalidateVault(vaultID)
+	publishCtx := context.WithoutCancel(ctx)
+	for i := range members {
+		bus.PublishAccessChanged(publishCtx, uc.bus, vaultID, members[i].UserID)
+	}
+	bus.PublishVaultAccessChanged(publishCtx, uc.bus, vaultID)
+	return nil
 }

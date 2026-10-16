@@ -1,4 +1,4 @@
-.PHONY: build run test test-unit test-e2e sqlc lint fmt migrate-up migrate-down migrate-create docker-up docker-down clean
+.PHONY: build run test test-unit test-e2e test-integration sqlc lint fmt migrate-up migrate-down migrate-create docker-up docker-down clean
 
 BINARY_NAME=cortex-sync
 BUILD_DIR=./bin
@@ -22,8 +22,11 @@ test-unit:
 	go test ./internal/... -race -count=1
 
 test-e2e:
-	docker compose --profile replicas up -d --wait postgres s3 mailpit
+	docker compose --profile replicas up -d --wait postgres s3 mailpit || (docker compose logs s3; exit 1)
 	./test/e2e/run.sh
+
+test-integration:
+	CORTEX_TEST_DATABASE_URL="$(DATABASE_URL)" go test -tags integration ./internal/platform/postgres/... -count=1
 
 sqlc:
 	go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.29.0 generate

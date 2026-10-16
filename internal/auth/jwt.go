@@ -12,6 +12,10 @@ import (
 	"github.com/google/uuid"
 )
 
+func init() {
+	jwt.TimePrecision = time.Millisecond
+}
+
 type JWTGenerator struct {
 	secret       []byte
 	accessExpiry time.Duration
@@ -54,11 +58,14 @@ func (g *JWTGenerator) GenerateAccessToken(userID uuid.UUID, email string, devic
 
 func (g *JWTGenerator) ValidateAccessToken(tokenString string) (*httpx.Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &accessClaims{}, func(token *jwt.Token) (any, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-		}
 		return g.secret, nil
-	})
+	},
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithIssuer(g.issuer),
+		jwt.WithExpirationRequired(),
+		jwt.WithIssuedAt(),
+		jwt.WithLeeway(30*time.Second),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -78,10 +85,15 @@ func (g *JWTGenerator) ValidateAccessToken(tokenString string) (*httpx.Claims, e
 		return nil, fmt.Errorf("invalid device ID in token")
 	}
 
+	var issuedAt time.Time
+	if claims.IssuedAt != nil {
+		issuedAt = claims.IssuedAt.Time
+	}
 	return &httpx.Claims{
 		UserID:   userID,
 		Email:    claims.Email,
 		DeviceID: deviceID,
+		IssuedAt: issuedAt,
 	}, nil
 }
 

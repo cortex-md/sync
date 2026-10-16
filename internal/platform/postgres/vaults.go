@@ -73,6 +73,20 @@ func (r *VaultRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Va
 	return &vault, nil
 }
 
+func (r *VaultRepository) ReconcileStorage(ctx context.Context) (int64, error) {
+	n, err := r.q(ctx).ReconcileVaultStorage(ctx)
+	return n, mapError(err)
+}
+
+func (r *VaultRepository) GetForUpdate(ctx context.Context, id uuid.UUID) (*domain.Vault, error) {
+	v, err := r.q(ctx).GetVaultForUpdate(ctx, id)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	vault := toVault(v)
+	return &vault, nil
+}
+
 func (r *VaultRepository) ListSummariesForUser(ctx context.Context, userID uuid.UUID) ([]domain.VaultSummary, error) {
 	rows, err := r.q(ctx).ListVaultSummariesForUser(ctx, userID)
 	if err != nil {
@@ -240,6 +254,9 @@ func (r *VaultInviteRepository) Create(ctx context.Context, inv *domain.VaultInv
 	encodedGrants, err := json.Marshal(grants)
 	if err != nil {
 		return err
+	}
+	if err := r.q(ctx).DeleteExpiredPendingInvite(ctx, db.DeleteExpiredPendingInviteParams{VaultID: inv.VaultID, Email: inv.InviteeEmail}); err != nil {
+		return mapError(err)
 	}
 	n, err := r.q(ctx).CreateInvite(ctx, db.CreateInviteParams{
 		ID:                inv.ID,

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -16,7 +17,7 @@ import (
 func RequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := r.Header.Get("X-Request-ID")
-		if requestID == "" {
+		if !validRequestID(requestID) {
 			requestID = uuid.New().String()
 		}
 		w.Header().Set("X-Request-ID", requestID)
@@ -46,13 +47,13 @@ func Logger(next http.Handler) http.Handler {
 			}
 			logEvent = logEvent.
 				Str("query", sanitizeRawQuery(r.URL.RawQuery)).
-				Str("remote_addr", r.RemoteAddr).
+				Str("client_ip", ClientIPFrom(r)).
 				Str("user_agent", r.UserAgent())
 		}
 
 		logEvent.
 			Str("method", r.Method).
-			Str("path", r.URL.Path).
+			Str("route", routePattern(r)).
 			Int("status", ww.statusCode).
 			Dur("duration", duration).
 			Int("bytes", ww.bytesWritten).
@@ -66,8 +67,9 @@ func Recoverer(next http.Handler) http.Handler {
 			if err := recover(); err != nil {
 				zerolog.Ctx(r.Context()).Error().
 					Interface("panic", err).
+					Str("route", routePattern(r)).
 					Msg("panic recovered")
-				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+				WriteLimited(w, http.StatusInternalServerError, "internal_error", "internal server error", 0)
 			}
 		}()
 		next.ServeHTTP(w, r)
@@ -128,4 +130,36 @@ func sanitizeRawQuery(rawQuery string) string {
 		}
 	}
 	return values.Encode()
+}
+
+func validRequestID(id string) bool {
+	if id == "" || len(id) > 64 {
+		return false
+	}
+	for _, c := range id {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func routePattern(r *http.Request) string {
+	if rctx := chi.RouteContext(r.Context()); rctx != nil {
+		if pattern := rctx.RoutePattern(); pattern != "" {
+			return pattern
+		}
+	}
+	return "unmatched"
+}
+
+func SecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header := w.Header()
+		header.Set("X-Content-Type-Options", "nosniff")
+		if strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/account/") {
+			header.Set("Cache-Control", "no-store")
+		}
+		next.ServeHTTP(w, r)
+	})
 }

@@ -1,1 +1,0 @@
-ALTER TABLE devices ADD COLUMN last_sync_event_id BIGINT NOT NULL DEFAULT 0;

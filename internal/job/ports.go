@@ -10,9 +10,12 @@ import (
 
 type EmailOutboxRepository interface {
 	Enqueue(ctx context.Context, email *domain.OutboxEmail) error
-	ClaimDue(ctx context.Context, limit int) ([]domain.OutboxEmail, error)
+	Claim(ctx context.Context, id int64, lease time.Duration) (*domain.OutboxEmail, error)
+	ClaimDue(ctx context.Context, limit int, lease time.Duration) ([]domain.OutboxEmail, error)
 	MarkSent(ctx context.Context, id int64) error
-	MarkFailed(ctx context.Context, id int64, lastError string, nextAttemptAt time.Time) error
+	MarkRetry(ctx context.Context, id int64, lastError string, nextAttemptAt time.Time) error
+	MarkDead(ctx context.Context, id int64, lastError string) error
+	DeleteFinished(ctx context.Context, sentBefore, deadBefore time.Time) (int64, error)
 }
 
 type Locker interface {

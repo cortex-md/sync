@@ -23,7 +23,8 @@ SELECT * FROM subscriptions WHERE external_customer_id = $1 AND external_custome
 UPDATE subscriptions SET external_customer_id = @external_customer_id, external_subscription_id = @external_subscription_id,
     external_checkout_id = @external_checkout_id, status = @status, current_period_start = @current_period_start,
     current_period_end = @current_period_end, entitlement_expires_at = @entitlement_expires_at,
-    billing_cycle = @billing_cycle, plan_product_id = @plan_product_id, updated_at = @updated_at
+    billing_cycle = @billing_cycle, plan_product_id = @plan_product_id, updated_at = @updated_at,
+    last_event_at = @last_event_at
 WHERE id = @id;
 
 -- name: CreateWebhookEvent :exec

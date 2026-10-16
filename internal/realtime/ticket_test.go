@@ -38,3 +38,19 @@ func TestTicketSigner_IsBoundToVaultPathAndSignature(t *testing.T) {
 	_, err = signer.Verify(expired, vaultID, "notes/a.md")
 	assert.Error(t, err)
 }
+
+func TestTicketSigner_RejectsReplayOnTheSameInstance(t *testing.T) {
+	signer := realtime.NewTicketSigner("secret", time.Minute)
+	userID, vaultID := uuid.New(), uuid.New()
+	ticket, _, err := signer.Issue(userID, vaultID, "notes/a.md")
+	require.NoError(t, err)
+
+	_, err = signer.Verify(ticket, vaultID, "notes/a.md")
+	require.NoError(t, err)
+	_, err = signer.Verify(ticket, vaultID, "notes/a.md")
+	assert.Error(t, err)
+
+	other, _, err := signer.Issue(userID, vaultID, "notes/a.md")
+	require.NoError(t, err)
+	assert.NotEqual(t, ticket, other)
+}

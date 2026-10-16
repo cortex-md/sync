@@ -23,7 +23,7 @@ type inviteTestSetup struct {
 	vaultRepo  *fake.VaultRepository
 }
 
-func newInviteTestSetup() *inviteTestSetup {
+func newInviteTestSetup(opts ...func(*vault.InviteDeps)) *inviteTestSetup {
 	vaultRepo := fake.NewVaultRepository()
 	memberRepo := fake.NewVaultMemberRepository()
 	keyRepo := fake.NewVaultKeyRepository()
@@ -32,7 +32,11 @@ func newInviteTestSetup() *inviteTestSetup {
 	vaultRepo.ResolveSummariesWith(memberRepo, keyRepo)
 	inviteRepo.ResolveDetailsWith(vaultRepo, userRepo)
 	vaultUC := vault.NewService(vault.Deps{Vaults: vaultRepo, Members: memberRepo, Keys: keyRepo, Invites: inviteRepo, Tx: fake.NewTransactor()})
-	inviteUC := vault.NewInviteService(vault.InviteDeps{Invites: inviteRepo, Members: memberRepo, Keys: keyRepo, Users: userRepo, Vaults: vaultRepo, Tx: fake.NewTransactor()})
+	deps := vault.InviteDeps{Invites: inviteRepo, Members: memberRepo, Keys: keyRepo, Users: userRepo, Vaults: vaultRepo, Tx: fake.NewTransactor()}
+	for _, opt := range opts {
+		opt(&deps)
+	}
+	inviteUC := vault.NewInviteService(deps)
 
 	return &inviteTestSetup{
 		uc:         inviteUC,
@@ -226,8 +230,9 @@ func TestInviteListMyInvites_Success(t *testing.T) {
 		ActorID: owner.ID, VaultID: testVault.ID, InviteeEmail: "invitee@test.com",
 		Role: domain.VaultRoleEditor, EncryptedVaultKey: []byte("key"),
 	})
+	invitee := seedUser(t, s.userRepo, "invitee@test.com")
 
-	invites, err := s.uc.ListMyInvites(context.Background(), "invitee@test.com")
+	invites, err := s.uc.ListMyInvites(context.Background(), invitee.ID)
 	require.NoError(t, err)
 	assert.Len(t, invites, 1)
 	assert.Equal(t, "Test Vault", invites[0].VaultName)
@@ -243,8 +248,9 @@ func TestInviteListMyInvites_FiltersAccepted(t *testing.T) {
 		Role: domain.VaultRoleEditor, EncryptedVaultKey: []byte("key"),
 	})
 	s.inviteRepo.Accept(context.Background(), invite.ID)
+	invitee := seedUser(t, s.userRepo, "invitee@test.com")
 
-	invites, err := s.uc.ListMyInvites(context.Background(), "invitee@test.com")
+	invites, err := s.uc.ListMyInvites(context.Background(), invitee.ID)
 	require.NoError(t, err)
 	assert.Empty(t, invites)
 }
@@ -428,4 +434,35 @@ func TestInviteDelete_WrongVault(t *testing.T) {
 		ActorID: owner.ID, VaultID: vault2.ID, InviteID: invite.ID,
 	})
 	assert.ErrorIs(t, err, domain.ErrNotFound)
+}
+
+func TestInviteEmailTrustRequiresVerifiedEmail(t *testing.T) {
+	s := newInviteTestSetup(func(d *vault.InviteDeps) { d.EmailTrust = vault.EmailTrustVerified })
+	owner := seedUser(t, s.userRepo, "owner@test.com")
+	testVault := createTestVault(t, s.vaultUC, owner.ID)
+	invite, err := s.uc.Create(context.Background(), vault.CreateInviteInput{
+		ActorID: owner.ID, VaultID: testVault.ID, InviteeEmail: "squatter@test.com", Role: domain.VaultRoleAdmin,
+	})
+	require.NoError(t, err)
+	squatter := seedUser(t, s.userRepo, "squatter@test.com")
+
+	listed, err := s.uc.ListMyInvites(context.Background(), squatter.ID)
+	require.NoError(t, err)
+	assert.Empty(t, listed)
+	_, err = s.uc.Accept(context.Background(), vault.AcceptInviteInput{UserID: squatter.ID, InviteID: invite.ID})
+	assert.ErrorIs(t, err, domain.ErrEmailNotVerified)
+}
+
+func TestInviteEmailTrustNoneOnlyAcceptsTokens(t *testing.T) {
+	s := newInviteTestSetup(func(d *vault.InviteDeps) { d.EmailTrust = vault.EmailTrustNone })
+	owner := seedUser(t, s.userRepo, "owner@test.com")
+	testVault := createTestVault(t, s.vaultUC, owner.ID)
+	invite, err := s.uc.Create(context.Background(), vault.CreateInviteInput{
+		ActorID: owner.ID, VaultID: testVault.ID, InviteeEmail: "invitee@test.com", Role: domain.VaultRoleEditor,
+	})
+	require.NoError(t, err)
+	invitee := seedUser(t, s.userRepo, "invitee@test.com")
+
+	_, err = s.uc.Accept(context.Background(), vault.AcceptInviteInput{UserID: invitee.ID, InviteID: invite.ID})
+	assert.ErrorIs(t, err, domain.ErrFeatureDisabled)
 }

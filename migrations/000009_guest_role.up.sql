@@ -1,1 +1,0 @@
-ALTER TYPE vault_role ADD VALUE IF NOT EXISTS 'guest';

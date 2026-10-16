@@ -2,7 +2,6 @@ package vault
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -81,8 +80,7 @@ func (h *EncryptionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req createVaultEncryptionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
+	if !httpx.DecodeJSON(w, r, &req) {
 		return
 	}
 

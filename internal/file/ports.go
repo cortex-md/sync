@@ -88,6 +88,7 @@ type SyncEventRepository interface {
 	Create(ctx context.Context, event *domain.SyncEvent) error
 	ListScoped(ctx context.Context, vaultID uuid.UUID, sinceID int64, limit int, scope domain.Scope) ([]domain.SyncEvent, error)
 	LatestID(ctx context.Context, vaultID uuid.UUID) (int64, error)
+	PrunedThrough(ctx context.Context) (int64, error)
 }
 
 type CollabDocumentRepository interface {

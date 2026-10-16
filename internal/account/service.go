@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"github.com/cortexnotes/cortex-sync/internal/platform/txhook"
 	"io"
 	"net/url"
 	"strings"
@@ -25,6 +26,7 @@ const (
 )
 
 type Service struct {
+	revoker       TokenRevoker
 	users         UserRepository
 	members       MembershipRepository
 	vaultKeys     VaultKeyRepository
@@ -56,10 +58,12 @@ type Deps struct {
 	BlobQueue     BlobQueue
 	PublicURL     string
 	Verification  bool
+	Revoker       TokenRevoker
 }
 
 func NewService(deps Deps) *Service {
 	return &Service{
+		revoker:       deps.Revoker,
 		blobQueue:     deps.BlobQueue,
 		verification:  deps.Verification,
 		users:         deps.Users,
@@ -139,7 +143,7 @@ func (uc *Service) ChangePassword(ctx context.Context, input ChangePasswordInput
 		return domain.ErrInvalidCredentials
 	}
 
-	hash, err := uc.hasher.Hash(input.NewPassword)
+	hash, err := uc.hasher.HashFor(user.KDFVersion, input.NewPassword)
 	if err != nil {
 		return err
 	}
@@ -156,6 +160,7 @@ func (uc *Service) ChangePassword(ctx context.Context, input ChangePasswordInput
 		if err := uc.refreshTokens.RevokeAllByUserExceptDevice(ctx, user.ID, input.DeviceID); err != nil {
 			return err
 		}
+		uc.revokeSessionsAfterCommit(ctx, user.ID, input.DeviceID)
 		if err := uc.tokens.DeleteByUserAndKind(ctx, user.ID, domain.UserTokenPasswordReset); err != nil {
 			return err
 		}
@@ -359,7 +364,11 @@ func (uc *Service) ResetPassword(ctx context.Context, input ResetPasswordInput) 
 	if input.Keys != nil && !input.Keys.valid() {
 		return domain.ErrInvalidInput
 	}
-	hash, err := uc.hasher.Hash(input.Password)
+	kdfVersion := domain.KDFVersionLegacy
+	if input.Keys != nil {
+		kdfVersion = domain.KDFVersionArgon2
+	}
+	hash, err := uc.hasher.HashFor(kdfVersion, input.Password)
 	if err != nil {
 		return err
 	}
@@ -403,6 +412,7 @@ func (uc *Service) ResetPassword(ctx context.Context, input ResetPasswordInput) 
 		if err := uc.refreshTokens.RevokeAllByUserID(ctx, user.ID); err != nil {
 			return err
 		}
+		uc.revokeSessionsAfterCommit(ctx, user.ID, uuid.Nil)
 		return uc.enqueue(ctx, user.Email, domain.EmailTemplatePasswordChanged, user, nil)
 	})
 	if err != nil {
@@ -457,7 +467,7 @@ func (uc *Service) SetupKeys(ctx context.Context, input SetupKeysInput) (*domain
 	if err := uc.hasher.Compare(user.PasswordHash, input.CurrentPassword); err != nil {
 		return nil, domain.ErrInvalidCredentials
 	}
-	hash, err := uc.hasher.Hash(input.Password)
+	hash, err := uc.hasher.HashFor(domain.KDFVersionArgon2, input.Password)
 	if err != nil {
 		return nil, err
 	}
@@ -650,4 +660,11 @@ func (uc *Service) releaseBlob(ctx context.Context, key string) {
 		return
 	}
 	_ = uc.blobs.Delete(context.WithoutCancel(ctx), key)
+}
+
+func (uc *Service) revokeSessionsAfterCommit(ctx context.Context, userID uuid.UUID, keepDevice uuid.UUID) {
+	if uc.revoker == nil {
+		return
+	}
+	txhook.AfterCommit(ctx, func() { uc.revoker.RevokeUserExcept(context.WithoutCancel(ctx), userID, keepDevice) })
 }

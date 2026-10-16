@@ -6,12 +6,14 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"mime"
 	"mime/quotedprintable"
 	"net"
 	"net/mail"
 	"net/smtp"
+	"net/textproto"
 	"strconv"
 	"time"
 
@@ -48,14 +50,23 @@ func NewSMTPMailer(cfg SMTPConfig, renderer *Renderer) (*SMTPMailer, error) {
 func (m *SMTPMailer) Send(ctx context.Context, email domain.OutboxEmail) error {
 	rendered, err := m.renderer.Render(email.Template, email.Locale, email.Data)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: render %s: %v", ErrPermanent, email.Template, err)
 	}
 	to, err := mail.ParseAddress(email.To)
 	if err != nil {
-		return fmt.Errorf("invalid recipient: %w", err)
+		return fmt.Errorf("%w: invalid recipient: %v", ErrPermanent, err)
 	}
+	err = m.deliver(ctx, email, rendered, *to)
+	var reply *textproto.Error
+	if errors.As(err, &reply) && reply.Code >= 500 {
+		return fmt.Errorf("%w: %v", ErrPermanent, err)
+	}
+	return err
+}
 
-	message, err := buildMessage(m.from, *to, email.Template, rendered)
+func (m *SMTPMailer) deliver(ctx context.Context, email domain.OutboxEmail, rendered *Rendered, to mail.Address) error {
+
+	message, err := buildMessage(m.from, to, email.Template, rendered)
 	if err != nil {
 		return err
 	}

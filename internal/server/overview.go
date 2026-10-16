@@ -75,7 +75,7 @@ func (h *OverviewHandler) Account(w http.ResponseWriter, r *http.Request) {
 		overviewError(w, err)
 		return
 	}
-	invites, err := h.invites.ListMyInvites(ctx, user.Email)
+	invites, err := h.invites.ListMyInvites(ctx, claims.UserID)
 	if err != nil {
 		overviewError(w, err)
 		return
@@ -190,7 +190,7 @@ func (h *OverviewHandler) Vault(w http.ResponseWriter, r *http.Request) {
 			resp.Members = append(resp.Members, vault.ToMemberResponse(m))
 			userIDs = append(userIDs, m.UserID)
 		}
-		if err := h.attachDevices(ctx, vaultID, userIDs, &resp); err != nil {
+		if err := h.attachDevices(ctx, vaultID, userIDs, role.Can(domain.PermMemberManage), &resp); err != nil {
 			overviewError(w, err)
 			return
 		}
@@ -241,7 +241,7 @@ func (h *OverviewHandler) Vault(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, resp)
 }
 
-func (h *OverviewHandler) attachDevices(ctx context.Context, vaultID uuid.UUID, userIDs []uuid.UUID, resp *vaultOverviewResponse) error {
+func (h *OverviewHandler) attachDevices(ctx context.Context, vaultID uuid.UUID, userIDs []uuid.UUID, allDevices bool, resp *vaultOverviewResponse) error {
 	devices, err := h.deviceStore.ListActiveByUsers(ctx, userIDs)
 	if err != nil {
 		return err
@@ -262,7 +262,11 @@ func (h *OverviewHandler) attachDevices(ctx context.Context, vaultID uuid.UUID, 
 			DeviceType: d.DeviceType,
 			LastSeenAt: d.LastSeenAt.UTC().Format(time.RFC3339),
 		}
-		if t, ok := syncedAt[d.ID]; ok {
+		t, synced := syncedAt[d.ID]
+		if !synced && !allDevices {
+			continue
+		}
+		if synced {
 			entry.SyncedAt = t.UTC().Format(time.RFC3339)
 		}
 		resp.Devices = append(resp.Devices, entry)

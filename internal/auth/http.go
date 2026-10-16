@@ -3,10 +3,13 @@ package auth
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
+	"strconv"
 
 	"github.com/cortexnotes/cortex-sync/internal/domain"
 	"github.com/cortexnotes/cortex-sync/internal/platform/httpx"
+	"github.com/cortexnotes/cortex-sync/internal/platform/middleware"
 	"github.com/cortexnotes/cortex-sync/internal/platform/validate"
 	"github.com/google/uuid"
 )
@@ -38,8 +41,7 @@ type registerResponse struct {
 
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	var req registerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
+	if !httpx.DecodeJSON(w, r, &req) {
 		return
 	}
 
@@ -115,8 +117,7 @@ type loginResponse struct {
 
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
+	if !httpx.DecodeJSON(w, r, &req) {
 		return
 	}
 
@@ -146,6 +147,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	output, err := h.auth.Login(r.Context(), LoginInput{
 		Email:      req.Email,
 		Password:   req.Password,
+		ClientIP:   middleware.ClientIPFrom(r),
 		DeviceID:   deviceID,
 		DeviceName: req.DeviceName,
 		DeviceType: req.DeviceType,
@@ -227,8 +229,7 @@ type refreshResponse struct {
 
 func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 	var req refreshRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
+	if !httpx.DecodeJSON(w, r, &req) {
 		return
 	}
 
@@ -283,13 +284,22 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 func handleAuthError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, domain.ErrInvalidInput):
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		httpx.WriteErrorWithCode(w, http.StatusBadRequest, "invalid input", "invalid_input")
 	case errors.Is(err, domain.ErrAlreadyExists):
 		httpx.WriteErrorWithCode(w, http.StatusConflict, "user already exists", "user_exists")
 	case errors.Is(err, domain.ErrRegistrationClosed):
 		httpx.WriteErrorWithCode(w, http.StatusForbidden, "registration is closed", "registration_closed")
 	case errors.Is(err, domain.ErrInvalidCredentials):
-		httpx.WriteError(w, http.StatusUnauthorized, "invalid credentials")
+		httpx.WriteErrorWithCode(w, http.StatusUnauthorized, "invalid credentials", "invalid_credentials")
+	case errors.Is(err, domain.ErrTooManyAttempts):
+		var retry *RetryError
+		if errors.As(err, &retry) && retry.RetryAfter > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retry.RetryAfter.Seconds()))))
+		}
+		httpx.WriteErrorWithCode(w, http.StatusTooManyRequests, "too many failed attempts, try again later", "too_many_attempts")
+	case errors.Is(err, domain.ErrServerBusy):
+		w.Header().Set("Retry-After", "5")
+		httpx.WriteErrorWithCode(w, http.StatusServiceUnavailable, "server is busy, retry shortly", "server_busy")
 	case errors.Is(err, domain.ErrDeviceRevoked):
 		httpx.WriteErrorWithCode(w, http.StatusForbidden, "device has been revoked", "device_revoked")
 	case errors.Is(err, domain.ErrDeviceConflict):
@@ -301,6 +311,9 @@ func handleAuthError(w http.ResponseWriter, err error) {
 	case errors.Is(err, domain.ErrTokenReuseDetected):
 		httpx.WriteErrorWithCode(w, http.StatusUnauthorized, "token reuse detected, all sessions revoked", "token_reuse")
 	default:
-		httpx.WriteError(w, http.StatusInternalServerError, "internal server error")
+		if httpx.WriteDomainError(w, err) {
+			return
+		}
+		httpx.WriteInternalError(w)
 	}
 }

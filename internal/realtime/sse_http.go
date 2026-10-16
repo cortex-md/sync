@@ -2,7 +2,6 @@ package realtime
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -21,6 +20,7 @@ import (
 )
 
 type SSEHandler struct {
+	revoked   func(*httpx.Claims) bool
 	broker    *EventBroker
 	events    SyncEventRepository
 	authz     *authz.Authorizer
@@ -37,6 +37,7 @@ type SSEDeps struct {
 	Lifecycle *lifecycle.Lifecycle
 	Ping      time.Duration
 	Guard     StreamGuard
+	Revoked   func(*httpx.Claims) bool
 }
 
 func NewSSEHandler(d SSEDeps) *SSEHandler {
@@ -50,6 +51,7 @@ func NewSSEHandler(d SSEDeps) *SSEHandler {
 		d.Authz = authz.New(d.Members)
 	}
 	return &SSEHandler{
+		revoked:   d.Revoked,
 		broker:    d.Broker,
 		events:    d.Events,
 		authz:     d.Authz,
@@ -119,12 +121,19 @@ func (h *SSEHandler) Events(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
+	w = deadlineWriter{ResponseWriter: w, controller: http.NewResponseController(w)}
+	fmt.Fprintf(w, "retry: %d\n\n", sseRetryMillis)
 	flusher.Flush()
 
 	var lastSentID int64
 	if lastEventID := r.Header.Get("Last-Event-ID"); lastEventID != "" {
 		if sinceID, parseErr := strconv.ParseInt(lastEventID, 10, 64); parseErr == nil {
-			lastSentID = h.replayEvents(ctx, w, flusher, vaultID, sinceID, access.Scope)
+			if h.cursorExpired(ctx, sinceID) {
+				writeSSEEvent(w, Event{EventType: sseEventReset, Data: `{"reason":"cursor_expired"}`})
+				flusher.Flush()
+			} else {
+				lastSentID = h.replayEvents(ctx, w, flusher, vaultID, sinceID, access.Scope)
+			}
 		}
 	}
 
@@ -163,13 +172,31 @@ func (h *SSEHandler) Events(w http.ResponseWriter, r *http.Request) {
 			if h.guard != nil && h.guard(ctx, vaultID, claims.UserID) != nil {
 				return
 			}
+			if h.revoked != nil && h.revoked(claims) {
+				return
+			}
 			fmt.Fprintf(w, "event: ping\ndata: {}\n\n")
 			flusher.Flush()
 		}
 	}
 }
 
-const sseReplayPageSize = 500
+const (
+	sseEventReset     = "reset"
+	sseReplayPageSize = 500
+	sseWriteTimeout   = 30 * time.Second
+	sseRetryMillis    = 5000
+)
+
+type deadlineWriter struct {
+	http.ResponseWriter
+	controller *http.ResponseController
+}
+
+func (d deadlineWriter) Write(p []byte) (int, error) {
+	_ = d.controller.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+	return d.ResponseWriter.Write(p)
+}
 
 func (h *SSEHandler) replayEvents(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, vaultID uuid.UUID, sinceID int64, scope domain.Scope) int64 {
 	lastID := sinceID
@@ -219,12 +246,8 @@ func eventFilter(scope domain.Scope, userID uuid.UUID) func(Event) bool {
 		if event.EventType == bus.VaultEventAccessChanged {
 			return true
 		}
-		var payload struct {
-			FilePath string `json:"file_path"`
-			OldPath  string `json:"old_path"`
-			UserID   string `json:"user_id"`
-		}
-		if err := json.Unmarshal([]byte(event.Data), &payload); err != nil {
+		payload := event.resolveTarget()
+		if !payload.valid {
 			return false
 		}
 		if payload.FilePath != "" {
@@ -232,4 +255,12 @@ func eventFilter(scope domain.Scope, userID uuid.UUID) func(Event) bool {
 		}
 		return member || payload.UserID == self
 	}
+}
+
+func (h *SSEHandler) cursorExpired(ctx context.Context, sinceID int64) bool {
+	if sinceID <= 0 {
+		return false
+	}
+	prunedThrough, err := h.events.PrunedThrough(ctx)
+	return err == nil && sinceID < prunedThrough
 }

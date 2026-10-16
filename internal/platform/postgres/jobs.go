@@ -33,28 +33,49 @@ func (r *EmailOutboxRepository) Enqueue(ctx context.Context, email *domain.Outbo
 	return nil
 }
 
-func (r *EmailOutboxRepository) ClaimDue(ctx context.Context, limit int) ([]domain.OutboxEmail, error) {
-	rows, err := r.q(ctx).ClaimDueEmails(ctx, int32(limit))
+func (r *EmailOutboxRepository) Claim(ctx context.Context, id int64, lease time.Duration) (*domain.OutboxEmail, error) {
+	row, err := r.q(ctx).ClaimEmail(ctx, db.ClaimEmailParams{ID: id, LeaseSeconds: int32(lease.Seconds())})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	email := outboxEmail(row.ID, row.ToAddress, row.Template, row.Locale, row.Data, row.Attempts, row.NextAttemptAt, row.CreatedAt)
+	return &email, nil
+}
+
+func (r *EmailOutboxRepository) ClaimDue(ctx context.Context, limit int, lease time.Duration) ([]domain.OutboxEmail, error) {
+	rows, err := r.q(ctx).ClaimDueEmails(ctx, db.ClaimDueEmailsParams{RowLimit: int32(limit), LeaseSeconds: int32(lease.Seconds())})
 	if err != nil {
 		return nil, mapError(err)
 	}
 	emails := make([]domain.OutboxEmail, len(rows))
 	for i, e := range rows {
-		emails[i] = domain.OutboxEmail{
-			ID: e.ID, To: e.ToAddress, Template: e.Template, Locale: e.Locale,
-			Attempts: int(e.Attempts), NextAttemptAt: e.NextAttemptAt, CreatedAt: e.CreatedAt,
-		}
-		_ = json.Unmarshal(e.Data, &emails[i].Data)
+		emails[i] = outboxEmail(e.ID, e.ToAddress, e.Template, e.Locale, e.Data, e.Attempts, e.NextAttemptAt, e.CreatedAt)
 	}
 	return emails, nil
+}
+
+func outboxEmail(id int64, to, template, locale string, data []byte, attempts int32, next, created time.Time) domain.OutboxEmail {
+	email := domain.OutboxEmail{ID: id, To: to, Template: template, Locale: locale, Attempts: int(attempts), NextAttemptAt: next, CreatedAt: created}
+	_ = json.Unmarshal(data, &email.Data)
+	return email
 }
 
 func (r *EmailOutboxRepository) MarkSent(ctx context.Context, id int64) error {
 	return mapError(r.q(ctx).MarkEmailSent(ctx, id))
 }
 
-func (r *EmailOutboxRepository) MarkFailed(ctx context.Context, id int64, lastError string, nextAttemptAt time.Time) error {
-	return mapError(r.q(ctx).MarkEmailFailed(ctx, db.MarkEmailFailedParams{ID: id, LastError: lastError, NextAttemptAt: nextAttemptAt}))
+func (r *EmailOutboxRepository) MarkRetry(ctx context.Context, id int64, lastError string, nextAttemptAt time.Time) error {
+	return mapError(r.q(ctx).MarkEmailRetry(ctx, db.MarkEmailRetryParams{ID: id, LastError: lastError, NextAttemptAt: nextAttemptAt}))
+}
+
+func (r *EmailOutboxRepository) MarkDead(ctx context.Context, id int64, lastError string) error {
+	return mapError(r.q(ctx).MarkEmailDead(ctx, db.MarkEmailDeadParams{ID: id, LastError: lastError}))
+}
+
+func (r *EmailOutboxRepository) DeleteFinished(ctx context.Context, sentBefore, deadBefore time.Time) (int64, error) {
+	return deleteInBatches(ctx, func(limit int32) (int64, error) {
+		return r.q(ctx).DeleteFinishedEmails(ctx, db.DeleteFinishedEmailsParams{SentBefore: sentBefore, DeadBefore: deadBefore, RowLimit: limit})
+	})
 }
 
 type Locker struct{ store }

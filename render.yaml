@@ -1,0 +1,62 @@
+services:
+  - type: web
+    name: cortex-sync
+    runtime: docker
+    plan: free
+    region: virginia
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: CORTEX_SERVER_ENV
+        value: production
+      - key: CORTEX_SERVER_PORT
+        value: "10000"
+      - key: CORTEX_SERVER_PUBLIC_URL
+        sync: false
+      - key: CORTEX_DEPLOYMENT
+        value: single
+      - key: CORTEX_PROXY
+        value: render
+      - key: CORTEX_PROTECTION
+        value: standard
+      - key: CORTEX_DATABASE_URL
+        sync: false
+      - key: CORTEX_AUTH_ACCESS_TOKEN_SECRET
+        generateValue: true
+      - key: CORTEX_AUTH_REGISTRATION_MODE
+        value: open
+      - key: CORTEX_STORAGE_BACKEND
+        value: r2
+      - key: CORTEX_STORAGE_ENDPOINT
+        sync: false
+      - key: CORTEX_STORAGE_ACCESS_KEY
+        sync: false
+      - key: CORTEX_STORAGE_SECRET_KEY
+        sync: false
+      - key: CORTEX_STORAGE_BUCKET
+        value: cortex
+      - key: CORTEX_TENANCY_MODE
+        value: multi
+      - key: CORTEX_TENANCY_DEFAULT_VAULT_QUOTA
+        value: 1GiB
+      - key: CORTEX_FEATURES
+        value: collab,avatars,guests,public_links
+      - key: CORTEX_MAIL_DRIVER
+        value: resend
+      - key: CORTEX_MAIL_RESEND_API_KEY
+        sync: false
+      - key: CORTEX_MAIL_FROM
+        value: Cortex <no-reply@cortex-md.tech>
+      - key: CORTEX_CORS_ALLOWED_ORIGINS
+        value: https://cortex-md.tech
+      - key: CORTEX_SUBSCRIPTION_ENABLED
+        value: "false"
+      - key: CORTEX_SUBSCRIPTION_STRIPE_SECRET_KEY
+        sync: false
+      - key: CORTEX_SUBSCRIPTION_STRIPE_PRICE_ID
+        sync: false
+      - key: CORTEX_SUBSCRIPTION_STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: CORTEX_DEVOPS_DISCORD_WEBHOOK_URL
+        sync: false

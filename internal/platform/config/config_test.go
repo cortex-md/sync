@@ -173,7 +173,36 @@ func TestLoadAppliesProductionPolicyValidation(t *testing.T) {
 
 	require.Nil(t, cfg)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "production auth access token secret")
+	require.Contains(t, err.Error(), "CORTEX_AUTH_ACCESS_TOKEN_SECRET")
+}
+
+func TestLoadRejectsKnownSecretOnPublicServerOutsideProduction(t *testing.T) {
+	clearStorageEnv(t)
+	t.Setenv("CORTEX_SERVER_PUBLIC_URL", "https://sync.example.com")
+	t.Setenv("CORTEX_AUTH_ACCESS_TOKEN_SECRET", "dev-only-change-this-token-secret-32")
+
+	_, err := Load()
+
+	require.Error(t, err)
+}
+
+func TestLoadWarnsAboutKnownSecretOnLocalhost(t *testing.T) {
+	clearStorageEnv(t)
+	t.Setenv("CORTEX_AUTH_ACCESS_TOKEN_SECRET", "dev-only-change-this-token-secret-32")
+
+	cfg, err := Load()
+
+	require.NoError(t, err)
+	require.NotEmpty(t, cfg.Warnings)
+}
+
+func TestLoadRejectsCredentialedWildcardCORS(t *testing.T) {
+	clearStorageEnv(t)
+	t.Setenv("CORTEX_CORS_ALLOW_CREDENTIALS", "true")
+
+	_, err := Load()
+
+	require.Error(t, err)
 }
 
 func TestLoadAcceptsValidProductionPolicy(t *testing.T) {

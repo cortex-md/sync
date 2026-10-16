@@ -83,38 +83,55 @@ sync server through the HTTP URL, usually `http://localhost:8080`.
 
 ### Production self-hosting
 
-For a small VPS, use the templates in `deploy/production`:
+The reference deployment is a Render web service (Docker runtime) with Neon PostgreSQL, Cloudflare
+R2 for encrypted snapshots and Resend for email. [`render.yaml`](render.yaml) is the Render
+Blueprint, [`.env.example`](.env.example) lists every value it needs, and
+[docs/self-hosting.md](docs/self-hosting.md) walks through the setup step by step.
 
-```bash
-cd deploy/production
-cp env.example .env
-./scripts/deploy.sh v0.1.0
-```
+The same image runs anywhere Docker does (`ghcr.io/cortex-md/sync`). A single box on a private
+network only needs `CORTEX_DEPLOYMENT=single` and a PostgreSQL database; several replicas behind a
+load balancer use `CORTEX_DEPLOYMENT=cluster`. Both setups are covered in
+[docs/self-hosting.md](docs/self-hosting.md), and every variable is documented in
+[docs/configuration.md](docs/configuration.md).
 
-The production template runs Caddy for HTTPS in front of two sync replicas, PostgreSQL in a Docker
-volume, and stores encrypted snapshots in Cloudflare R2. Read
-[docs/self-hosting.md](docs/self-hosting.md) before deploying.
+### Configuration
+
+A handful of high-level keys cover most deployments; each expands into a preset that any
+fine-grained variable can override:
+
+| Variable | Values | Default |
+| --- | --- | --- |
+| `CORTEX_DEPLOYMENT` | `single` (one process, in-memory bus, migrations on boot) or `cluster` (replicas through PostgreSQL) | `single` |
+| `CORTEX_PROXY` | `none`, `render`, `cloudflare`, `hops:N` | `none` |
+| `CORTEX_PROTECTION` | `off`, `standard`, `strict` | `standard` |
+| `CORTEX_FEATURES` | `collab,avatars,guests,public_links,metrics` | `collab,avatars,guests,public_links` |
+
+See [docs/configuration.md](docs/configuration.md) for the protection presets and the full list.
 
 ### Features
 
-Every optional feature is a single environment variable. A disabled feature has its routes answer
-`404 {"code":"feature_disabled"}` and its background jobs are never started. Clients read the
-active set from `GET /meta/v1/capabilities`.
+Optional features are listed in `CORTEX_FEATURES`; anything not listed is off. A disabled feature
+has its routes answer `404 {"code":"feature_disabled"}` and its background jobs are never started.
+Clients read the active set from `GET /meta/v1/capabilities`.
 
 | Feature | Variable | Default | Effect when off |
 | --- | --- | --- | --- |
-| Tenancy | `CORTEX_TENANCY_MODE` | `single` | `multi` enables per-vault storage quotas and bills sync by the vault owner |
+| Live collaboration | `CORTEX_FEATURES` contains `collab` | on | Collab, presence and ticket routes are disabled |
+| Avatars | `CORTEX_FEATURES` contains `avatars` | on | Avatar routes are disabled and `avatar_url` is empty |
+| Guests | `CORTEX_FEATURES` contains `guests` | on | Guest invites and the `guest` role are disabled (groups and path access stay on) |
+| Public note links | `CORTEX_FEATURES` contains `public_links` | on | Share routes, the `/s/{id}` viewer and `/share/v1/{id}` are disabled |
+| Metrics | `CORTEX_FEATURES` contains `metrics` | off | No `/metrics` route and no metrics middleware |
+| Tenancy | `CORTEX_TENANCY_MODE` | `single` | `multi` enables per-vault storage quotas, per-account caps and bills sync by the vault owner |
 | Vault creation | `CORTEX_VAULT_CREATION` | `everyone` | `admins` lets only the instance admin (first user) create vaults |
-| Email | `CORTEX_MAIL_DRIVER` | `none` | Invites return only the link; email changes apply immediately with the password |
+| Email | `CORTEX_MAIL_DRIVER` | `none` | No verification, password reset or email-addressed invites; invite links still work |
 | Email verification | `CORTEX_FEATURE_EMAIL_VERIFICATION` | `auto` | Verification routes are disabled; `auto` follows the mail driver |
 | Password reset | `CORTEX_FEATURE_PASSWORD_RESET` | `auto` | Forgot/reset routes are disabled; `auto` follows the mail driver |
-| Live collaboration | `CORTEX_FEATURE_COLLAB` | `true` | Collab, presence and ticket routes are not mounted |
-| Avatars | `CORTEX_FEATURE_AVATARS` | `true` | Avatar routes are not mounted and `avatar_url` is empty |
-| Guests | `CORTEX_FEATURE_GUESTS` | `true` | Guest invites and the `guest` role are disabled (groups and path access stay on) |
-| Public note links | `CORTEX_FEATURE_PUBLIC_LINKS` | `true` | Share routes, the `/s/{id}` viewer and `/share/v1/{id}` are disabled |
 | Subscriptions | `CORTEX_SUBSCRIPTION_ENABLED` | `false` | No billing checks |
-| Metrics | `CORTEX_METRICS_ENABLED` | `true` | No `/metrics` route and no metrics middleware |
 | Registration | `CORTEX_AUTH_REGISTRATION_MODE` | `open` | `first-user` or `closed` restrict sign-up |
+
+`CORTEX_FEATURES=` (empty) turns every optional feature off. The older `CORTEX_FEATURE_COLLAB`,
+`CORTEX_FEATURE_AVATARS`, `CORTEX_FEATURE_GUESTS`, `CORTEX_FEATURE_PUBLIC_LINKS` and
+`CORTEX_METRICS_ENABLED` variables are still accepted and log a deprecation warning.
 
 Setting `CORTEX_FEATURE_EMAIL_VERIFICATION=true` or `CORTEX_FEATURE_PASSWORD_RESET=true` with
 `CORTEX_MAIL_DRIVER=none` fails at startup instead of silently degrading.
@@ -125,13 +142,30 @@ Password reset emails link to a page that opens the Cortex app
 (`cortex://reset-password?token=...&server=<CORTEX_SERVER_PUBLIC_URL>`): the new password is chosen
 in the app because the server never sees it (see the key model in [docs/api.md](docs/api.md#key-model)).
 
-Account emails (verification, email change, password reset) and vault invites are queued in
-PostgreSQL and delivered by a background worker. By default `CORTEX_MAIL_DRIVER=none` disables
-email entirely; `log` prints messages to the server log, which is handy in development. To send real
-emails:
+Account emails (verification, email change, password reset) and vault invites are written to the
+`email_outbox` table in the same transaction as the action. After the commit a dispatcher claims
+the row, sends it outside the transaction and records the result. Failed sends are retried after
+1m, 5m, 30m, 2h and 6h; after 6 attempts (or a permanent rejection) the row is marked failed. A
+sweep on boot and every hour picks up anything left behind, sent rows are deleted after 7 days and
+failed rows after 30.
+
+Drivers:
+
+- `none` (default) disables email. Email verification and password reset are off, email changes
+  apply immediately with the password, and invites only work through their link
+  (`GET /vaults/v1/invites` returns an empty list).
+- `log` prints messages to the server log, which is handy in development.
+- `resend` sends through the [Resend](https://resend.com) API with an idempotency key per outbox
+  row. Use it on hosts that block SMTP ports.
+- `smtp` sends through any SMTP server.
 
 ```bash
 CORTEX_SERVER_PUBLIC_URL=https://sync.example.com
+CORTEX_MAIL_DRIVER=resend
+CORTEX_MAIL_RESEND_API_KEY=re_...
+CORTEX_MAIL_FROM="Cortex <no-reply@example.com>"
+
+# or
 CORTEX_MAIL_DRIVER=smtp
 CORTEX_MAIL_HOST=smtp.example.com
 CORTEX_MAIL_PORT=587
@@ -140,10 +174,14 @@ CORTEX_MAIL_PASSWORD=...
 CORTEX_MAIL_FROM="Cortex <no-reply@example.com>"
 ```
 
+With mail enabled, email-addressed invites (listing and accepting by `invite_id`) and vaults with
+`allowed_email_domains` require a verified email address (`403 email_not_verified`).
+
 ### Running several instances
 
-Any number of replicas can run behind a load balancer without sticky sessions. Events, presence,
-collaboration relay and background jobs coordinate through PostgreSQL. Set
+Set `CORTEX_DEPLOYMENT=cluster` and any number of replicas can run behind a load balancer without
+sticky sessions. Events, presence, collaboration relay, revocations and background jobs coordinate
+through PostgreSQL. Run `cortex-sync migrate up` before rolling out a new version, and set
 `CORTEX_SERVER_DRAIN_DELAY` (for example `5s`) so the load balancer sees `/ready` fail before
 streams are closed during a rolling deploy.
 

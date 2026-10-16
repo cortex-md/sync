@@ -10,6 +10,7 @@ make run          # Build + run
 make test         # All tests with -race
 make test-unit    # ./internal/... with -race
 make test-e2e     # Multi-instance E2E suite (Docker: postgres, s3, mailpit)
+make test-integration # Postgres repository tests (build tag integration, CORTEX_TEST_DATABASE_URL)
 make sqlc         # Regenerate internal/platform/postgres/db from queries + migrations
 make lint         # golangci-lint
 make fmt          # gofmt + goimports
@@ -34,41 +35,50 @@ sync/
   cmd/server/main.go          # Entry point: config.Load, `migrate` subcommand, server.Run
   internal/
     domain/                    # Entities, errors, RBAC (permission.go), path access scope (scope.go); no internal imports
-    auth/                      # Register/login/refresh/logout, bcrypt hasher, JWT generator
+    auth/                      # Register/login/refresh/logout, hasher (bcrypt + sha256 auth keys), JWT, login throttle
     account/                   # Profile, password, email change/verification, reset, avatar
     device/                    # Device list/revoke/rename/sync cursor
     vault/                     # Vaults, members, groups + path access (access.go), invites, keys, encryption
-    file/                      # Snapshots, deltas, list/batch/history/changes, cursor, quota
-    realtime/                  # SSE broker + handler, collab rooms (WebSocket), tickets, binary frames
+    file/                      # service.go (deps), upload.go, download.go, mutate.go (delete/rename/restore),
+                               # query.go (info/list/history/changes), storage.go (quota), http.go, batch_http.go
+    realtime/                  # SSE broker + handler; collab: collab_http.go (connect), collab_session.go,
+                               # collab_cluster.go (cross-instance relay), collab_presence_http.go,
+                               # collab_ticket_http.go, collab_frames.go; room broker, tickets
     share/                     # E2E public note links: service, HTTP, /s/{id} viewer (embedded assets)
     subscription/              # Optional Stripe billing + entitlement middleware
     devops/                    # Optional Discord notifications
-    job/                       # Cleaner, blob janitor, mail worker
-    server/                    # Wiring (server.go), routes.go, overviews, readiness, background jobs
+    job/                       # Cleaner, blob janitor, mail dispatcher (mail_dispatcher.go)
+    server/                    # Wiring (server.go), routes.go, protection.go (limiter wiring), blob_queue.go
+                               # (after-commit kicks), overviews, readiness, background jobs
     platform/
-      config/                  # Env-only config (caarlos0/env), storage.go resolves S3 settings
+      config/                  # Env-only config (caarlos0/env); profile.go expands high-level keys into presets,
+                               # storage.go resolves S3 settings
       feature/                 # Feature set, feature.Require gate, /meta/v1/capabilities
-      httpx/                   # JSON helpers, auth + device middleware, claims
+      httpx/                   # JSON helpers, errors.go (domain error -> status/code table), auth + device middleware, claims
       authz/                   # Cached authorizer (role + compiled path access scope)
       bus/                     # Signal bus interface + in-memory impl, vault event helpers
       lifecycle/               # Drain/stream tracking for graceful shutdown
+      revocation/              # Immediate access-token revocation (per device/user), propagated through the bus
+      txhook/                  # AfterCommit hooks run once the surrounding transaction commits
       pages/                   # HTML pages for email links and invite landing
       secret/                  # Random tokens + hashes
-      mail/                    # Email templates (embedded), SMTP and log mailers
+      mail/                    # Email templates (embedded), SMTP, Resend and log mailers, permanent/retry errors
       avatar/                  # Avatar decoding, crop and JPEG re-encoding
-      middleware/              # RequestID, Logger, Recoverer, BodyLimit, RateLimit, Metrics
+      middleware/              # RequestID, SecurityHeaders, Logger, Recoverer, ClientIP, BodyLimit, keyed RateLimit
+                               # (LRU), Concurrency, Metrics
       postgres/                # Repositories, listener, signal bus, migrator; queries/*.sql -> db/ (sqlc)
       s3/                      # S3-compatible blob storage (minio-go)
       fake/                    # In-memory repositories (tests + CORTEX_USE_FAKE_REPOS)
       validate/                # Input validation helpers
-  migrations/                  # golang-migrate SQL files, embedded via migrations/embed.go
+  migrations/                  # golang-migrate SQL files, one per entity (users … template_shares), embedded via migrations/embed.go
   test/e2e/                    # Multi-instance E2E suite (build tag e2e) + run.sh
   deploy/local/                # Local S3 credentials
-  deploy/production/           # Caddy + 2 replicas + R2 compose template and scripts
-  docs/                        # api.md, self-hosting.md, sync-client-guide.md
+  docs/                        # api.md, configuration.md, self-hosting.md, sync-client-guide.md
+  render.yaml                  # Render Blueprint (free plan, Docker runtime, /health, deploy after checks pass)
+  .env.example                 # Reference env for Render (Neon + R2 + Resend) and self-hosting
   sqlc.yaml                    # sqlc config
-  docker-compose.yml           # PostgreSQL 16 + SeaweedFS S3; `replicas` profile adds sync-replica + Mailpit
-  Dockerfile                   # Multi-stage alpine build
+  docker-compose.yml           # PostgreSQL 16 + SeaweedFS S3 (cluster mode); `replicas` profile adds sync-replica + Mailpit
+  Dockerfile                   # Go builder + distroless static nonroot runtime (no shell, no HEALTHCHECK)
   Makefile                     # Build/test/sqlc/migrate/docker targets
 ```
 
@@ -109,7 +119,17 @@ struct (`NewService(Deps{...})`). Shared infrastructure lives under `platform/`.
 - Device middleware extracts `X-Device-ID` into context
 - Access tokens carry the device id (`did` claim); `X-Device-ID` must match it or the request is rejected with `401 device_mismatch`
 - A device id is owned by one user: logging in with a device id owned by another account returns `409 device_conflict`, and the client must generate a new device id
-- Refresh tokens are consumed atomically; reuse or a revoked device revokes the whole token family
+- Refresh rotation runs in one transaction; reuse or a revoked device revokes the whole token family,
+  except that a token presented again within 30s of its rotation (`refresh_tokens.rotated_at`) gets
+  a fresh pair
+- JWT validation pins HS256, the issuer, requires `exp` and `iat`, 30s leeway, millisecond precision
+- Access tokens are revoked immediately (`platform/revocation`, propagated through the bus) on
+  logout, device revoke, password change (all devices except the current one) and reset; revoked
+  tokens get `401 token_invalid`
+- `kdf_version` 1 accounts store `sha256$` of the derived auth key (bcrypt hashes are rehashed on the
+  next login); unknown emails compare against a dummy hash. Legacy passwords over 72 bytes are `400`.
+  Bcrypt runs behind a semaphore (`503 server_busy` after 3s)
+- Login is throttled per email + client IP (`429 too_many_attempts` + `Retry-After`, 1m doubling to 1h)
 - Revoked devices are reactivated on successful login with valid credentials
 - Client clears device_id from keychain on logout; a fresh UUID is generated on next login
 
@@ -141,7 +161,8 @@ Permissions are a static bitmask matrix in `domain/permission.go` (`PermFileRead
 - **editor**: read + write files
 - **viewer**: read-only (collab updates from viewers are dropped)
 - **guest**: no access by default; only paths granted through access entries. Created only through
-  guest invites (`grants` in the invite become `user` entries on accept). Gated by `CORTEX_FEATURE_GUESTS`.
+  guest invites (`grants` in the invite become `user` entries on accept). Gated by `guests` in
+  `CORTEX_FEATURES`; guests lose access when the feature is off or the vault sets `allow_guests=false`.
 
 ### Groups and path access (always on)
 
@@ -169,6 +190,10 @@ Permissions are a static bitmask matrix in `domain/permission.go` (`PermFileRead
 - `CORTEX_TENANCY_MODE=single` (default) or `multi`. Multi enables per-vault storage quotas
   (`storage_quota_bytes`, set by instance admins via `PATCH /vaults/v1/{id}`, `507 quota_exceeded`)
   and bills `/sync/v1/vaults/{id}/...` against the vault owner's subscription.
+- New vaults get `CORTEX_TENANCY_DEFAULT_VAULT_QUOTA` (multi default `1GiB`). Multi mode also caps
+  vaults and devices per user, pending invites and shares per vault (`403 limit_reached`).
+- Delta bytes are added to vault storage and released when a snapshot prunes them; a daily
+  `vault_storage_reconcile` task corrects drift. `PATCH /vaults/v1/{id}` locks the vault row.
 - The first registered user is the instance admin (`users.is_instance_admin`).
   `CORTEX_VAULT_CREATION=admins` limits vault creation to instance admins.
 - Vault settings: `icon`, `allowed_email_domains` (checked on invite and accept), `allow_guests`.
@@ -181,13 +206,18 @@ Permissions are a static bitmask matrix in `domain/permission.go` (`PermFileRead
 - **Deltas**: Small encrypted diffs (0.5-5KB) stored as BYTEA in PostgreSQL. Client computes deltas locally.
 - **file_latest**: Tracks current version, checksum, size, content_type, deleted flag per file per vault. Also tracks `LatestSnapshotVersion` and `SizeBytes` for delta policy evaluation.
 - **sync_events**: Append-only log of file mutations. Used for SSE replay and polling fallback.
-- Upload: `POST /sync/v1/vaults/{vaultID}/files` with `application/octet-stream` body, metadata in `X-File-Path` (percent-encoded when `X-File-Path-Encoding: uri`), `X-Local-Hash`, `X-Content-Type`, optional `X-Base-Version` headers. The blob is stored before the metadata transaction; `file_latest` rows are locked with `SELECT ... FOR UPDATE` on every mutation.
-- Rename moves snapshots and deltas to the new path, so history and downloads follow the file.
-- Download: `GET /sync/v1/vaults/{vaultID}/files?path=...&version=...` returns raw binary with metadata in response headers.
+- Upload: `POST /sync/v1/vaults/{vaultID}/files` with `application/octet-stream` body, metadata in `X-File-Path` (percent-encoded when `X-File-Path-Encoding: uri`), `X-Local-Hash` (or its alias `X-Checksum`), `X-Content-Type`, optional `X-Base-Version` headers. `Content-Length` is required (`411 length_required`). The blob is stored before the metadata transaction; `file_latest` rows are locked with `SELECT ... FOR UPDATE` on every mutation. An unchanged checksum returns `200` (new snapshots `201`). When the commit outcome is unknown (`domain.ErrCommitUncertain`) the blob is kept.
+- Delta retry: resending an already applied delta from the same device returns the current info instead of `409`.
+- Rename moves snapshots and deltas to the new path, so history and downloads follow the file. Paths are locked in sorted order; `postgres.Transactor` retries `40P01`/`40001` up to 3 times.
+- Download: `GET /sync/v1/vaults/{vaultID}/files?path=...&version=...` returns raw binary with metadata in response headers (`X-File-Version`, `X-Snapshot-Version`, `X-Author-Device-ID`, ...). Latest of a deleted file is `404`; a historical download reports the served snapshot's version. `ETag` is the snapshot id (`If-None-Match` -> `304`), `Cache-Control` is `immutable` with `version` and `no-cache` for latest.
 - Batch download: `POST /files/batch` streams `application/vnd.cortex.batch` frames
-  (`[u32 BE header len][JSON header][u64 BE body len][body]`), max 200 items / 64 MB.
-- List: `GET /files/list` supports `limit`/`cursor` (`X-Next-Cursor`), returns `X-Latest-Event-ID`
-  and a weak `ETag` (first page) so `If-None-Match` gets `304`.
+  (`[u32 BE header len][JSON header][u64 BE body len][body]`), max 200 items / 64 MB, at most
+  16 MiB read ahead and one concurrent batch per user.
+- List: `GET /files/list` supports `limit` (default 1000, max 5000) / `cursor` (`X-Next-Cursor`),
+  returns `X-Latest-Event-ID` and a weak `ETag` (first page) so `If-None-Match` gets `304`.
+- Changes: `GET /changes` clamps `limit` to 1000 and sets `X-Has-More` / `X-Next-Cursor`. Event
+  cleanup advances `sync_event_watermark.pruned_through`; a `since` below it returns
+  `410 cursor_expired` (SSE sends a `reset` event instead).
 - `PUT /sync/v1/vaults/{id}/cursor` stores a per-device, per-vault cursor (`device_vault_cursors`).
 - Blobs are tracked in `blob_uploads_pending` until the metadata commits; deletions go through the
   `blob_deletions` queue. `job.BlobJanitor` deletes orphans and drains the queue with backoff.
@@ -195,19 +225,31 @@ Permissions are a static bitmask matrix in `domain/permission.go` (`PermFileRead
 
 ## Multi-instance
 
-Every instance is stateless; PostgreSQL is the source of truth and the message bus.
+`CORTEX_DEPLOYMENT` picks the topology (`platform/config/profile.go`):
+
+- `single` (default): one process. In-memory bus (`bus.NewMemory`), in-memory collab presence, no
+  `LISTEN` connection, the file service publishes sync events straight to the SSE broker,
+  migrations run on boot, pool 5/0 with 2m idle, background jobs run without the advisory locker.
+- `cluster`: N stateless replicas; PostgreSQL is the source of truth and the message bus. Run
+  `cortex-sync migrate up` before rolling out; pool 10/1.
+
+In `cluster` mode:
 
 - One `LISTEN` connection per instance (`postgres.Listener`) handles `sync_events`,
-  `cortex_signals` and `subscription_updates`.
+  `cortex_signals` and `subscription_updates`. On reconnect it catches up missed sync events
+  (`SyncEventRelay.CatchUp`), invalidates the authorizer and rechecks access of open streams.
 - `bus.Bus` (`postgres.SignalBus`) carries ephemeral vault events (`member_joined`,
   `key_granted`, `collab_active`...), access revocations and collab relay frames. Payloads above
   7KB go through the `realtime_relay` table and NOTIFY only carries the row id.
 - Sync events lock the vault row (`FOR NO KEY UPDATE`) before inserting, so event ids are
   monotonic in commit order per vault and `Last-Event-ID` replay has no gaps.
-- Background jobs (`job.Cleaner`, `job.BlobJanitor`, `job.MailWorker`) are safe on N replicas:
+- Background jobs (`job.Cleaner`, `job.BlobJanitor`, `job.MailDispatcher`) are safe on N replicas:
   cleaners take a transaction-scoped advisory lock, queue workers claim rows with
-  `FOR UPDATE SKIP LOCKED`. The mail worker only runs when a mailer is configured.
-- Collab tickets are HMAC-signed (stateless), valid on any instance.
+  `FOR UPDATE SKIP LOCKED`. The blob janitor and mail dispatcher are kicked after commit
+  (`platform/txhook`, `server/blob_queue.go`); the janitor also sweeps every
+  `CORTEX_JOBS_SWEEP_INTERVAL` (1h).
+- Collab tickets are HMAC-signed, valid on any instance and single use per instance.
+- Access-token revocations travel over the bus so every instance rejects them immediately.
 - Shutdown drains: `/ready` returns 503, waits `CORTEX_SERVER_DRAIN_DELAY`, closes SSE/WebSocket
   streams (collab flushes buffered updates), then shuts down HTTP.
 
@@ -221,15 +263,23 @@ Every instance is stateless; PostgreSQL is the source of truth and the message b
 - Password reset emails open a page that deep links to `cortex://reset-password?token=&server=`;
   the app calls `POST /account/v1/password/reset/prepare` (recovery wrap, token not consumed) and
   then resets with the new key material.
-- Emails are written to `email_outbox` in the same transaction as the action and sent by
-  `job.MailWorker` with exponential backoff. Templates live in `platform/mail/templates/{en,pt-BR}`.
+- Emails are written to `email_outbox` in the same transaction as the action; after commit the
+  outbox id is pushed to `job.MailDispatcher`, which claims the row with a 2-minute lease and sends
+  outside the transaction. Retries back off 1m/5m/30m/2h/6h (or the provider's `Retry-After`); after
+  6 attempts or a permanent error (`mail.ErrPermanent`) the row is dead-lettered (`failed_at`). A
+  boot sweep and the hourly cleaner (`email_outbox_sweep`) pick up missed rows; sent rows are deleted
+  after 7 days and dead ones after 30. Drivers: `log`, `smtp`, `resend` (`mail/resend.go`, 2 req/s,
+  `Idempotency-Key: cortex-outbox-<id>`). Templates live in `platform/mail/templates/{en,pt-BR}`.
   Each template defines `subject` and `text` plus the HTML blocks `preheader`, `heading`, `body`,
   `note` and optionally `cta`, `details` and `why`; `layout.html` owns the card, the pill CTA (shown
   only when `Link` is set), the copyable fallback link, dark mode and the footer. The renderer adds
   `Locale` to the HTML data.
 - `CORTEX_MAIL_DRIVER=none` (default) disables mail: invites still return `invite_url`, email
   change applies immediately (`200 {"status":"changed"}`), verification and password reset routes
-  return `404 feature_disabled`.
+  return `404 feature_disabled`, and email-addressed invites are off (`GET /vaults/v1/invites`
+  returns `[]`, accept by `invite_id` is `404 feature_disabled`). With mail on, email-addressed
+  invites and vaults with `allowed_email_domains` require a verified email (`403 email_not_verified`);
+  see `vault.EmailTrust` and `server.inviteEmailTrust`.
 - Links in emails open GET pages that only render a form; the token is consumed on POST so email
   scanners cannot burn it. GET pages peek the token first, so an expired or used link shows the
   expired page (reset links offer a form that posts to `/password/forgot`).
@@ -247,10 +297,13 @@ Every instance is stateless; PostgreSQL is the source of truth and the message b
   can put an E2E secret there. The page shows the vault, member count, role and expiry, and
   `POST /invite/{token}/decline` deletes the invite and emails the inviter (`invite_declined`).
   Replaying an invite `id` rotates the token and re-sends the email with the new link.
-- `POST /vaults/v1/invites/accept` accepts `{token}` (any account) or `{invite_id}` (email match).
+- `POST /vaults/v1/invites/accept` accepts `{token}` (any account) or `{invite_id}` (email match
+  plus the email trust rules above). One pending invite per vault + email (unique index); pending
+  lists exclude expired invites.
 - `encrypted_vault_key` is optional on vault creation and invites. Members without a key appear in
   `GET /vaults/v1/{id}/keys/pending` with their public key, name, email and avatar; an admin seals
-  the VEK to that key and calls `PUT /vaults/v1/{id}/keys/{userID}` (`key_granted`).
+  the VEK to that key and calls `PUT /vaults/v1/{id}/keys/{userID}` (`key_granted`). Grants are
+  insert-only (`409 key_exists`) unless the actor outranks the target.
   `GET /sync/v1/vaults/{id}/encryption` reports `has_member_keys`.
 
 ## Public Note Links
@@ -275,15 +328,23 @@ Every instance is stateless; PostgreSQL is the source of truth and the message b
   (`collab_frames.go`): client→server `[opcode][payload]`, server→client
   `[opcode][client_id len][client_id][payload]`, opcodes 1–4. Control messages stay JSON; JSON and
   binary clients can share a room.
-- On join the server sends `welcome` (`client_id`, `up_to`, `peers`), then the compacted state
-  (`sync_step2`), persisted updates, this instance's unflushed updates and finally `synced`.
+- Ticket (`POST /collab/tickets`) is HMAC-signed, valid 60s and single use (each instance remembers
+  consumed signatures). Sockets per user are capped before the upgrade (`429 rate_limited`), and
+  each socket has a message rate limit (close `4429`).
+- On join the server sends `welcome` (`v: 1`, `client_id`, `up_to`, `peers`), then the compacted
+  state (`sync_step2`), persisted updates, this instance's unflushed updates and finally `synced`.
+  Pending (unflushed) updates are read before the document is loaded so none are lost to a
+  concurrent flush. Outgoing buffer is 1024 frames (`4408` when full).
 - Payloads are always client-side encrypted (`[0x01][nonce][AES-GCM ct||tag]`, key
   `HKDF(VEK, "cortex/collab/v1")`); the server only relays and stores opaque bytes.
 - Every relayed JSON frame carries a server-stamped `from` (user id, name, avatar, `can_write`);
   binary frames carry the sender's `client_id`, so awareness/cursors cannot be spoofed. `peer_joined` / `peer_left` announce presence.
 - Frames are relayed to other instances only when the room has remote peers (tracked through the
   `collab_presence` table), so a single instance pays no bus cost.
-- `compact` must send `up_to` (from `welcome`); only updates with id <= `up_to` are deleted.
+- `compact` must send `up_to` (from `welcome`); it is capped at the session's welcome `up_to` and
+  only updates with id <= `up_to` are deleted. `collab_documents.compacted_up_to` is locked during
+  compaction and an older or equal `up_to` is ignored.
+- Buffered updates flush every `CORTEX_COLLAB_FLUSH_INTERVAL` (2s), when a peer leaves and on shutdown.
 - Rename moves the collab document with the file; delete removes it in the same transaction.
 
 ## SSE
@@ -292,10 +353,12 @@ Every instance is stateless; PostgreSQL is the source of truth and the message b
 - Event types: `file_created`, `file_updated`, `file_deleted`, `file_renamed` (with id) and the
   ephemeral `collab_active`, `collab_inactive`, `member_joined`, `member_role_changed`,
   `member_removed`, `key_granted`, `member_key_changed`, `access_changed` (no id), plus `ping`
-- `Last-Event-ID` header for replay on reconnect
-- 30s ping interval
+- `Last-Event-ID` header for replay on reconnect; a cursor below `sync_event_watermark` gets a
+  `reset` event (`{"reason":"cursor_expired"}`) instead of the replay
+- First frame is `retry: 5000`; 30s ping interval; every write has a 30s deadline
+- Streams per user and per instance are capped (`503 server_busy` + `Retry-After`)
 - Slow subscribers are disconnected when their buffer is full; clients reconnect with `Last-Event-ID`
-- Events reach the broker only through PostgreSQL `NOTIFY` (id only) + `GetByID`, so every instance emits the same payload exactly once; fake-repo mode publishes directly
+- In `cluster` mode events reach the broker only through PostgreSQL `NOTIFY` (id only) + `GetByID`, so every instance emits the same payload exactly once; `single` and fake-repo mode publish directly
 - The handler subscribes before replaying, and drops events already sent during replay
 - Polling fallback: `GET /sync/v1/vaults/{vaultID}/changes?since=<event_id>`
 - File events are filtered by the caller's scope; guests only get member/key events about themselves
@@ -303,8 +366,9 @@ Every instance is stateless; PostgreSQL is the source of truth and the message b
 ## Testing
 
 ```bash
-make test       # go test ./... -race
-make test-e2e   # docker compose --profile replicas up postgres s3 mailpit, then test/e2e/run.sh
+make test             # go test ./... -race
+make test-integration # go test -tags integration ./internal/platform/postgres/... (CORTEX_TEST_DATABASE_URL)
+make test-e2e         # docker compose --profile replicas up postgres s3 mailpit, then test/e2e/run.sh
 ```
 
 - Unit and service tests live next to the code and use `platform/fake` repositories.
@@ -312,87 +376,55 @@ make test-e2e   # docker compose --profile replicas up postgres s3 mailpit, then
   `httptest.NewServer` for SSE/WebSocket). SSE tests use an `sseReader` (single goroutine owns the
   scanner); file tests use `doRawRequest` for binary uploads.
 - Bcrypt cost 4 in tests (`auth.NewBcryptHasherWithCost(4)`).
-- E2E (`test/e2e`, build tag `e2e`): `run.sh` migrates and starts 3 binaries against real
-  PostgreSQL/S3 — two instances (:8080, :8081) with SMTP to Mailpit and a minimal multi-tenant
-  instance (:8082) with mail, collab, avatars and guests off. Covers multi-instance SSE/collab,
-  sync contracts, guest scope, groups/path access, prelogin/kdf/key upgrade/reset, orphaned uploads,
-  the minimal feature set, quotas and graceful drain.
-  Runs as the `e2e` job in `.github/workflows/ci.yml`.
+- Integration (`internal/platform/postgres/integration_test.go`, build tag `integration`): runs the
+  repositories against a real database from `CORTEX_TEST_DATABASE_URL` (e.g. event watermark).
+- E2E (`test/e2e`, build tag `e2e`): `run.sh` migrates and starts 4 binaries against real
+  PostgreSQL/S3 with `CORTEX_PROTECTION=off`. Three run `CORTEX_DEPLOYMENT=cluster`: two instances
+  (:8080, :8081) with SMTP to Mailpit and a minimal multi-tenant instance (:8082) with
+  `CORTEX_FEATURES=` and mail off. The full suite covers multi-instance SSE/collab, sync contracts,
+  guest scope, groups/path access, prelogin/kdf/key upgrade/reset, orphaned uploads, the minimal
+  feature set, quotas and graceful drain. A second stage runs a subset (sync contracts, guest scope,
+  groups/path access, keys, note shares) against a `single`-mode instance (:8083).
+- CI (`.github/workflows/ci.yml`): `gofmt -l`, `go vet` (including `e2e` and `integration` tags),
+  `go test -race`, govulncheck; the `e2e` job runs the E2E suite, the integration tests and a
+  `migrate down 1` / `migrate up` round trip. Images are pushed after both jobs pass; there is no
+  deploy job (Render deploys after checks pass).
 
 ## Config
 
-All config via environment variables with `CORTEX_` prefix, parsed by `caarlos0/env` in
-`platform/config` (no config file). Invalid combinations fail at boot.
+All config via environment variables with `CORTEX_` prefix (plus `PORT` when
+`CORTEX_SERVER_PORT` is unset), parsed by `caarlos0/env` in `platform/config` (no config file).
+`profile.go` expands the high-level keys into presets; any fine-grained variable set explicitly
+wins over its preset. Invalid combinations fail at boot; boot logs a `configuration` summary and
+the collected `cfg.Warnings`. The full list of fine-grained variables and the protection preset
+numbers live in `docs/configuration.md`; keep it in sync when adding config.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| CORTEX_SERVER_ENV | development | Runtime mode: development or production |
-| CORTEX_SERVER_HOST | 0.0.0.0 | Bind address |
-| CORTEX_SERVER_PORT | 8080 | Listen port |
-| CORTEX_SERVER_SHUTDOWN_TIMEOUT | 15s | Graceful shutdown timeout |
-| CORTEX_SERVER_READ_TIMEOUT | 15s | HTTP read timeout |
-| CORTEX_SERVER_READ_HEADER_TIMEOUT | 5s | HTTP header read timeout |
-| CORTEX_SERVER_IDLE_TIMEOUT | 60s | HTTP idle timeout |
-| CORTEX_SERVER_TRUST_PROXY_HEADERS | false | Trust X-Forwarded-For/X-Real-IP for rate limiting |
-| CORTEX_SERVER_PUBLIC_URL | http://localhost:PORT | Public base URL used in email links (required in production) |
-| CORTEX_SERVER_DRAIN_DELAY | 0s | Time `/ready` reports 503 before streams are closed on shutdown |
-| CORTEX_RATE_LIMIT_SENSITIVE_REQUESTS_PER_SECOND | 1 | Per-IP rate for login, register and account token endpoints |
-| CORTEX_RATE_LIMIT_SENSITIVE_BURST | 10 | Burst for the sensitive limiter |
-| CORTEX_TENANCY_MODE | single | `single` or `multi` (quotas, owner-billed vaults) |
+| CORTEX_DEPLOYMENT | single | `single` (memory bus, migrations on boot, pool 5/0) or `cluster` (PG LISTEN/NOTIFY bus, run `migrate up` separately, pool 10/1) |
+| CORTEX_PROXY | none | `none`, `render` (= `hops:1`), `cloudflare` (`CF-Connecting-IP`) or `hops:N` (Nth `X-Forwarded-For` hop from the right). Replaces `CORTEX_SERVER_TRUST_PROXY_HEADERS` (still read as `hops:1` with a warning) |
+| CORTEX_PROTECTION | standard | `off`, `standard`, `strict` presets for rate limits, body/file sizes, upload/stream/collab caps, login lockout (`protectionPresets`) |
+| CORTEX_FEATURES | collab,avatars,guests,public_links | Enabled optional features: `collab`, `avatars`, `guests`, `public_links`, `metrics`. `CORTEX_FEATURE_*` and `CORTEX_METRICS_ENABLED` still override with a warning |
+| CORTEX_TENANCY_MODE | single | `single` or `multi` (quotas, account caps, owner-billed vaults) |
+| CORTEX_TENANCY_DEFAULT_VAULT_QUOTA | 0 / 1GiB (multi) | Size quota stored on new vaults |
+| CORTEX_TENANCY_MAX_VAULTS_PER_USER / _MAX_DEVICES_PER_USER / _MAX_PENDING_INVITES_PER_VAULT / _MAX_SHARES_PER_VAULT | multi: 10 / 10 / 50 / 200 | Account caps (`403 limit_reached`); 0 = unlimited |
 | CORTEX_VAULT_CREATION | everyone | `everyone` or `admins` (instance admins only) |
 | CORTEX_AUTH_REGISTRATION_MODE | open | `open`, `first-user` or `closed` |
-| CORTEX_FEATURE_COLLAB | true | Collab WebSocket, tickets, peers, presence |
-| CORTEX_FEATURE_AVATARS | true | Avatar upload and serving |
-| CORTEX_FEATURE_GUESTS | true | Guest invites and the guest role |
-| CORTEX_FEATURE_PUBLIC_LINKS | true | Public note links and the `/s/{id}` viewer |
-| CORTEX_FEATURE_EMAIL_VERIFICATION | auto | `auto` (on when mail is enabled), `true`, `false`; `true` without mail fails at boot |
-| CORTEX_FEATURE_PASSWORD_RESET | auto | Same values as above |
-| CORTEX_METRICS_ENABLED / _PATH | true / /metrics | Prometheus endpoint |
-| CORTEX_RATE_LIMIT_REQUESTS_PER_SECOND / _BURST | 100 / 200 | Global per-IP limiter |
-| CORTEX_MAIL_DRIVER | none | `none` (mail off), `log` (prints emails) or `smtp` |
-| CORTEX_MAIL_HOST / _PORT | / 587 | SMTP server |
-| CORTEX_MAIL_USERNAME / _PASSWORD | | SMTP credentials |
-| CORTEX_MAIL_FROM | Cortex <no-reply@localhost> | Sender address |
-| CORTEX_MAIL_TLS_MODE | starttls | `starttls`, `tls` (implicit, port 465) or `none` |
-| CORTEX_MAIL_TIMEOUT | 15s | SMTP timeout |
-| CORTEX_AVATAR_MAX_BYTES | 5242880 | Max avatar upload size |
-| CORTEX_AVATAR_SIZE | 256 | Avatar output size in pixels |
-| CORTEX_SERVER_MAX_JSON_BODY | 134217728 | Max JSON request body bytes |
-| CORTEX_SERVER_MAX_UPLOAD_BODY | 104857600 | Max octet-stream upload bytes |
-| CORTEX_CORS_ALLOWED_ORIGINS | * | Comma-separated CORS origins |
-| CORTEX_CORS_ALLOW_CREDENTIALS | false | Enable credentialed browser CORS |
-| CORTEX_DATABASE_URL | postgres://cortex:cortex@localhost:5432/cortex_sync?sslmode=disable | PostgreSQL connection |
-| CORTEX_DATABASE_MAX_CONNS | 25 | Connection pool max |
-| CORTEX_DATABASE_MIN_CONNS | 5 | Connection pool min |
-| CORTEX_DATABASE_MIGRATIONS_PATH | | Optional golang-migrate source URL; empty uses the embedded migrations |
-| CORTEX_STORAGE_BACKEND | local | Storage backend: local, r2, or s3 |
-| CORTEX_STORAGE_ENDPOINT | localhost:9000 | Object storage endpoint |
-| CORTEX_STORAGE_ACCESS_KEY | minioadmin | Object storage access key |
-| CORTEX_STORAGE_SECRET_KEY | minioadmin | Object storage secret key |
-| CORTEX_STORAGE_BUCKET | cortex-snapshots | Bucket for file snapshots |
-| CORTEX_STORAGE_REGION | us-east-1 | Storage region; use auto for R2 |
-| CORTEX_USE_FAKE_REPOS | false | Use in-memory fake repos instead of PostgreSQL/S3 |
-| CORTEX_AUTH_ACCESS_TOKEN_SECRET | change-me-in-production | JWT signing secret |
-| CORTEX_AUTH_ACCESS_TOKEN_EXPIRY | 15m | Access token lifetime |
-| CORTEX_AUTH_REFRESH_TOKEN_EXPIRY | 2160h | Refresh token lifetime (90 days) |
-| CORTEX_AUTH_ISSUER | cortex-sync | JWT issuer claim |
-| CORTEX_SYNC_MAX_DELTAS_BEFORE_SNAPSHOT | 10 | Max consecutive deltas before server signals needs_snapshot |
-| CORTEX_SYNC_MAX_DELTA_SIZE_RATIO | 0.5 | Max accumulated delta size as ratio of last snapshot size |
-| CORTEX_SYNC_MAX_FILE_SIZE | 104857600 | Max file size in bytes (0 disables check) |
-| CORTEX_SYNC_MAX_SNAPSHOTS_PER_FILE | 50 | Max snapshot versions retained per file (0 disables pruning) |
-| CORTEX_SYNC_EVENT_RETENTION | 720h | How long sync events are retained (0 disables cleanup) |
-| CORTEX_COLLAB_MAX_PEERS_PER_ROOM | 10 | Max concurrent WebSocket peers per collab room |
-| CORTEX_COLLAB_FLUSH_INTERVAL | 10s | How often buffered Yjs updates are flushed to the database |
-| CORTEX_COLLAB_MAX_BUF_BYTES | 4194304 | Per-room buffered update bytes before a forced flush |
-| CORTEX_SUBSCRIPTION_ENABLED | false | Enable Cortex Cloud subscription enforcement |
-| CORTEX_SUBSCRIPTION_STRIPE_SECRET_KEY | | Stripe secret key, required in production when subscription is enabled |
-| CORTEX_SUBSCRIPTION_STRIPE_PRICE_ID | | Stripe recurring price ID used for Checkout subscription line items |
-| CORTEX_SUBSCRIPTION_STRIPE_WEBHOOK_SECRET | | Stripe webhook endpoint secret for `Stripe-Signature` validation |
-| CORTEX_SUBSCRIPTION_CACHE_TTL | 60s | Maximum positive entitlement cache lifetime |
-| CORTEX_SUBSCRIPTION_RENEWAL_GRACE | 48h | Grace added after each billing period before entitlement expires |
-| CORTEX_DEVOPS_DISCORD_WEBHOOK_URL | | Optional Discord webhook for DevOps account, auth, and billing notifications |
-| CORTEX_DEVOPS_DISCORD_USERNAME | Cortex DevOps | Discord webhook display username |
-| CORTEX_DEVOPS_DISCORD_TIMEOUT | 5s | Discord webhook request timeout |
+| CORTEX_AUTH_ACCESS_TOKEN_SECRET | | At least 32 chars and not a known default, or boot fails (only a warning outside production on a localhost URL or fake repos) |
+| CORTEX_SERVER_ENV | development | `development` or `production` |
+| CORTEX_SERVER_PORT | 8080 | Listen port (`PORT` fallback) |
+| CORTEX_SERVER_PUBLIC_URL | http://localhost:PORT | Public base URL used in email links (required in production) |
+| CORTEX_SERVER_DRAIN_DELAY | 0s | Time `/ready` reports 503 before streams are closed on shutdown |
+| CORTEX_DATABASE_URL | postgres://cortex:cortex@localhost:5432/cortex_sync?sslmode=disable | PostgreSQL connection (Neon: direct, not `-pooler`) |
+| CORTEX_STORAGE_BACKEND | local | `local`, `r2` or `s3` (plus `_ENDPOINT`, `_ACCESS_KEY`, `_SECRET_KEY`, `_BUCKET`, `_REGION`) |
+| CORTEX_MAIL_DRIVER | none | `none`, `log`, `smtp` (`CORTEX_MAIL_HOST`...) or `resend` (`CORTEX_MAIL_RESEND_API_KEY`, optional `_RESEND_URL`); `CORTEX_MAIL_FROM` |
+| CORTEX_FEATURE_EMAIL_VERIFICATION / _PASSWORD_RESET | auto | `auto` follows the mail driver; `true` without mail fails at boot |
+| CORTEX_CORS_ALLOWED_ORIGINS / _ALLOW_CREDENTIALS | * / false | Credentials with `*` fail at boot |
+| CORTEX_JOBS_SWEEP_INTERVAL | 1h | Blob janitor safety sweep |
+| CORTEX_COLLAB_FLUSH_INTERVAL | 2s | Collab update flush interval |
+| CORTEX_SUBSCRIPTION_ENABLED | false | Stripe enforcement (Stripe keys required in production) |
+| CORTEX_DEVOPS_DISCORD_WEBHOOK_URL | | Optional Discord notifications |
+| CORTEX_USE_FAKE_REPOS | false | In-memory repositories (not allowed in production) |
 
 ## Dependencies
 
@@ -421,14 +453,16 @@ Core tables: `users`, `devices`, `refresh_tokens`, `user_tokens`, `vaults`, `vau
 `vault_groups`, `vault_group_members`, `vault_path_rules`, `vault_path_access`, `vault_invites`, `vault_keys`, `vault_encryption`, `file_snapshots`,
 `file_deltas`, `file_latest`, `sync_events`, `device_vault_cursors`, `blob_uploads_pending`,
 `blob_deletions`, `collab_documents`, `collab_updates`, `collab_presence`, `realtime_relay`,
-`email_outbox`, `subscriptions`.
+`email_outbox`, `subscriptions`, `sync_event_watermark`.
 
 Queries are generated with sqlc:
 
-1. Add or change a migration in `migrations/` (new numbered file; never edit applied ones).
+1. Add a migration in `migrations/` as a new numbered file (`000013_<change>.up.sql` + `.down.sql`).
+   The baseline is one file per entity (`000001_users` … `000012_template_shares`); once a
+   database is deployed, never edit applied files.
 2. Write the query in `internal/platform/postgres/queries/<area>.sql` with a `-- name: X :one|:many|:exec` header.
 3. Run `make sqlc` (`go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.29.0 generate`, config `sqlc.yaml`).
-   Schema input is `internal/platform/postgres/sqlc_prelude.sql` + `migrations/`; output goes to
+   Schema input is `migrations/`; output goes to
    `internal/platform/postgres/db` (commit it).
 4. Map `db` rows to domain types in the matching `platform/postgres/*.go` repository.
 
@@ -437,6 +471,9 @@ PG NOTIFY trigger on `sync_events` insert for real-time event propagation.
 Subscription updates also emit PG NOTIFY on `subscription_updates`. The runtime entitlement checker
 caches only positive access decisions and invalidates local cache entries from webhooks and database
 notifications, so failed notifications fall back to the short TTL.
+
+Stripe webhooks apply in one transaction and ignore events older than the last applied one
+(`subscriptions.last_event_at`).
 
 ## Current State
 
@@ -448,10 +485,18 @@ notifications, so failed notifications fall back to the short TTL.
 - Feature flags and tenancy (`single`/`multi`) with `/meta/v1/capabilities`; guest role, groups and
   server-enforced path access; Argon2id/HKDF identity keys with recovery; vault tenant settings and storage quotas; `/account/v1/overview` and
   `/vaults/v1/{id}/overview`; gzip for JSON responses.
-- Multi-instance safe (PG LISTEN/NOTIFY bus, advisory-locked jobs, HMAC collab tickets, drain on
-  shutdown) and covered by the E2E suite in CI.
+- `single` and `cluster` deployment modes; cluster is multi-instance safe (PG LISTEN/NOTIFY bus,
+  advisory-locked jobs, HMAC collab tickets, drain on shutdown); both are covered by the E2E suite
+  in CI. Production reference deployment is Render + Neon + R2 + Resend (`render.yaml`).
+- Abuse protection presets (`server/protection.go`): client IP from `CORTEX_PROXY`, LRU-capped
+  keyed limiters, per-user read/write/heavy buckets, upload concurrency and hourly byte budget,
+  route-level body limits, SSE/collab caps, login throttle, bcrypt semaphore.
+- Every error response is `{error, code}` (`httpx/errors.go` table, `codeForStatus` fallback).
 - `main.go` → `server.Run`; `CORTEX_USE_FAKE_REPOS=true` runs fully in memory (not allowed in production).
-- Logger middleware logs non-2xx responses with Warn (4xx) or Error (5xx) level, including query, remote_addr, user_agent, and up to 1KB of response body
+- Logger middleware logs the chi route pattern (never the raw path); responses >= 400 are logged at
+  Warn (4xx) or Error (5xx) with sanitized query, `client_ip` and user agent. `X-Request-ID` is
+  accepted only when it is at most 64 chars of `[A-Za-z0-9_-]`. `SecurityHeaders` sets `nosniff`
+  and `Cache-Control: no-store` on `/auth` and `/account`.
 
 ## API Reference
 

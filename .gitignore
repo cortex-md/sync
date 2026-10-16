@@ -7,4 +7,5 @@ coverage.html
 !.env.local.example
 config.yaml
 config.yml
-deploy/
+deploy/production/.env
+deploy/production/backups/

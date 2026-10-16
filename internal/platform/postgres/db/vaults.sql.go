@@ -168,6 +168,21 @@ func (q *Queries) DeleteExpiredInvites(ctx context.Context) (int64, error) {
 	return result.RowsAffected(), nil
 }
 
+const deleteExpiredPendingInvite = `-- name: DeleteExpiredPendingInvite :exec
+DELETE FROM vault_invites
+WHERE vault_id = $1 AND lower(invitee_email) = lower($2::text) AND accepted = false AND expires_at <= now()
+`
+
+type DeleteExpiredPendingInviteParams struct {
+	VaultID uuid.UUID
+	Email   string
+}
+
+func (q *Queries) DeleteExpiredPendingInvite(ctx context.Context, arg DeleteExpiredPendingInviteParams) error {
+	_, err := q.db.Exec(ctx, deleteExpiredPendingInvite, arg.VaultID, arg.Email)
+	return err
+}
+
 const deleteInvite = `-- name: DeleteInvite :execrows
 DELETE FROM vault_invites WHERE id = $1
 `
@@ -318,6 +333,30 @@ func (q *Queries) GetVaultEncryption(ctx context.Context, vaultID uuid.UUID) (Va
 		&i.Salt,
 		&i.EncryptedVek,
 		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getVaultForUpdate = `-- name: GetVaultForUpdate :one
+SELECT id, name, description, owner_id, created_at, updated_at, icon, allowed_email_domains, allow_guests, storage_used_bytes, storage_quota_bytes, allow_public_links FROM vaults WHERE id = $1 FOR UPDATE
+`
+
+func (q *Queries) GetVaultForUpdate(ctx context.Context, id uuid.UUID) (Vault, error) {
+	row := q.db.QueryRow(ctx, getVaultForUpdate, id)
+	var i Vault
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Description,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Icon,
+		&i.AllowedEmailDomains,
+		&i.AllowGuests,
+		&i.StorageUsedBytes,
+		&i.StorageQuotaBytes,
+		&i.AllowPublicLinks,
 	)
 	return i, err
 }
@@ -494,7 +533,7 @@ func (q *Queries) ListMembershipsByUser(ctx context.Context, userID uuid.UUID) (
 }
 
 const listPendingInvitesByVault = `-- name: ListPendingInvitesByVault :many
-SELECT id, vault_id, inviter_id, invitee_email, role, encrypted_vault_key, accepted, expires_at, created_at, token_hash, grants FROM vault_invites WHERE vault_id = $1 AND accepted = false ORDER BY created_at
+SELECT id, vault_id, inviter_id, invitee_email, role, encrypted_vault_key, accepted, expires_at, created_at, token_hash, grants FROM vault_invites WHERE vault_id = $1 AND accepted = false AND expires_at > now() ORDER BY created_at
 `
 
 func (q *Queries) ListPendingInvitesByVault(ctx context.Context, vaultID uuid.UUID) ([]VaultInvite, error) {
@@ -710,6 +749,26 @@ func (q *Queries) PendingInviteExists(ctx context.Context, arg PendingInviteExis
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const reconcileVaultStorage = `-- name: ReconcileVaultStorage :execrows
+UPDATE vaults v SET storage_used_bytes = usage.total
+FROM (
+    SELECT x.id,
+        (coalesce((SELECT sum(s.size_bytes) FROM file_snapshots s WHERE s.vault_id = x.id), 0)
+        + coalesce((SELECT sum(d.size_bytes) FROM file_deltas d WHERE d.vault_id = x.id), 0)
+        + coalesce((SELECT sum(n.size_bytes) FROM note_shares n WHERE n.vault_id = x.id), 0))::bigint AS total
+    FROM vaults x
+) usage
+WHERE v.id = usage.id AND v.storage_used_bytes <> usage.total
+`
+
+func (q *Queries) ReconcileVaultStorage(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, reconcileVaultStorage)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const removeMember = `-- name: RemoveMember :execrows

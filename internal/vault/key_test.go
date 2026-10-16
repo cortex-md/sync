@@ -139,3 +139,31 @@ func TestVaultKeyListByVault_NotMember(t *testing.T) {
 	_, err := s.uc.ListByVault(context.Background(), uuid.New(), testVault.ID)
 	assert.ErrorIs(t, err, domain.ErrVaultAccessDenied)
 }
+
+func TestVaultKeyGrant_AdminCannotOverwriteOwnerKey(t *testing.T) {
+	s := newKeyTestSetup()
+	ownerID, adminID := uuid.New(), uuid.New()
+	testVault := createTestVault(t, s.vaultUC, ownerID)
+	require.NoError(t, s.memberRepo.Add(context.Background(), &domain.VaultMember{VaultID: testVault.ID, UserID: adminID, Role: domain.VaultRoleAdmin}))
+	_, err := s.uc.Upsert(context.Background(), vault.UpsertVaultKeyInput{ActorID: ownerID, VaultID: testVault.ID, EncryptedKey: []byte("owner-key")})
+	require.NoError(t, err)
+
+	_, err = s.uc.Grant(context.Background(), vault.GrantVaultKeyInput{ActorID: adminID, VaultID: testVault.ID, UserID: ownerID, EncryptedKey: []byte("attacker-key")})
+
+	assert.ErrorIs(t, err, domain.ErrKeyExists)
+	stored, err := s.keyRepo.GetByVaultAndUser(context.Background(), testVault.ID, ownerID)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("owner-key"), stored.EncryptedKey)
+}
+
+func TestVaultKeyGrant_FillsMissingKeyAndOwnerCanReseal(t *testing.T) {
+	s := newKeyTestSetup()
+	ownerID, editorID := uuid.New(), uuid.New()
+	testVault := createTestVault(t, s.vaultUC, ownerID)
+	require.NoError(t, s.memberRepo.Add(context.Background(), &domain.VaultMember{VaultID: testVault.ID, UserID: editorID, Role: domain.VaultRoleEditor}))
+
+	_, err := s.uc.Grant(context.Background(), vault.GrantVaultKeyInput{ActorID: ownerID, VaultID: testVault.ID, UserID: editorID, EncryptedKey: []byte("first")})
+	require.NoError(t, err)
+	_, err = s.uc.Grant(context.Background(), vault.GrantVaultKeyInput{ActorID: ownerID, VaultID: testVault.ID, UserID: editorID, EncryptedKey: []byte("second")})
+	require.NoError(t, err)
+}

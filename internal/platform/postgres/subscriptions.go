@@ -29,6 +29,7 @@ func toSubscription(s db.Subscription) *domain.Subscription {
 		EntitlementExpiresAt:   timeOrZero(s.EntitlementExpiresAt),
 		BillingCycle:           s.BillingCycle,
 		PlanProductID:          s.PlanProductID,
+		LastEventAt:            timeOrZero(s.LastEventAt),
 		CreatedAt:              s.CreatedAt,
 		UpdatedAt:              s.UpdatedAt,
 	}
@@ -92,6 +93,7 @@ func (r *SubscriptionRepository) Update(ctx context.Context, s *domain.Subscript
 		BillingCycle:           s.BillingCycle,
 		PlanProductID:          s.PlanProductID,
 		UpdatedAt:              s.UpdatedAt,
+		LastEventAt:            optionalTime(s.LastEventAt),
 	}))
 }
 

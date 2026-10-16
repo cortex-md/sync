@@ -3,97 +3,118 @@ package middleware_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/cortexnotes/cortex-sync/internal/platform/middleware"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
 )
 
-func TestRateLimiter_AllowsRequestsUnderLimit(t *testing.T) {
-	rl := middleware.NewRateLimiter(rate.Limit(10), 10)
+func okHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+}
 
-	handler := rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
+func serveFrom(handler http.Handler, remote string, headers map[string]string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = remote
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
 
-	for i := 0; i < 10; i++ {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.RemoteAddr = "127.0.0.1:1234"
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
-		assert.Equal(t, http.StatusOK, rr.Code)
+func TestLimitByIPBlocksOverLimitWithRetryAfter(t *testing.T) {
+	limiter := middleware.NewKeyedLimiter(rate.Limit(1), 1, 100)
+	handler := middleware.ClientIP(middleware.NewIPResolver("none", 0))(middleware.LimitByIP(limiter)(okHandler()))
+
+	assert.Equal(t, http.StatusOK, serveFrom(handler, "192.168.1.1:5678", nil).Code)
+	blocked := serveFrom(handler, "192.168.1.1:5678", nil)
+	assert.Equal(t, http.StatusTooManyRequests, blocked.Code)
+	assert.Equal(t, "1", blocked.Header().Get("Retry-After"))
+	assert.Contains(t, blocked.Body.String(), `"code":"rate_limited"`)
+	assert.Equal(t, http.StatusOK, serveFrom(handler, "192.168.1.2:5678", nil).Code)
+}
+
+func TestNilLimiterIsPassthrough(t *testing.T) {
+	handler := middleware.LimitByIP(middleware.NewKeyedLimiter(0, 0, 100))(okHandler())
+	for range 5 {
+		assert.Equal(t, http.StatusOK, serveFrom(handler, "10.0.0.1:1", nil).Code)
 	}
 }
 
-func TestRateLimiter_BlocksRequestsOverLimit(t *testing.T) {
-	rl := middleware.NewRateLimiter(rate.Limit(1), 1)
-
-	handler := rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
+func TestHopsResolverIgnoresSpoofedLeftmostAddress(t *testing.T) {
+	resolver := middleware.NewIPResolver("hops", 1)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.RemoteAddr = "192.168.1.1:5678"
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusOK, rr.Code)
+	req.RemoteAddr = "10.0.0.5:443"
+	req.Header.Set("X-Forwarded-For", "1.2.3.4, 203.0.113.9")
+	assert.Equal(t, "203.0.113.9", resolver.Resolve(req))
 
-	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
-	req2.RemoteAddr = "192.168.1.1:5678"
-	rr2 := httptest.NewRecorder()
-	handler.ServeHTTP(rr2, req2)
-	assert.Equal(t, http.StatusTooManyRequests, rr2.Code)
+	two := middleware.NewIPResolver("hops", 2)
+	assert.Equal(t, "1.2.3.4", two.Resolve(req))
+
+	req.Header.Del("X-Forwarded-For")
+	assert.Equal(t, "10.0.0.5", resolver.Resolve(req))
 }
 
-func TestRateLimiter_IsolatesPerIP(t *testing.T) {
-	rl := middleware.NewRateLimiter(rate.Limit(1), 1)
-
-	handler := rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req1 := httptest.NewRequest(http.MethodGet, "/", nil)
-	req1.RemoteAddr = "10.0.0.1:1111"
-	rr1 := httptest.NewRecorder()
-	handler.ServeHTTP(rr1, req1)
-	assert.Equal(t, http.StatusOK, rr1.Code)
-
-	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
-	req2.RemoteAddr = "10.0.0.1:1111"
-	rr2 := httptest.NewRecorder()
-	handler.ServeHTTP(rr2, req2)
-	assert.Equal(t, http.StatusTooManyRequests, rr2.Code)
-
-	req3 := httptest.NewRequest(http.MethodGet, "/", nil)
-	req3.RemoteAddr = "10.0.0.2:2222"
-	rr3 := httptest.NewRecorder()
-	handler.ServeHTTP(rr3, req3)
-	assert.Equal(t, http.StatusOK, rr3.Code)
+func TestNoneResolverIgnoresForwardedHeaders(t *testing.T) {
+	resolver := middleware.NewIPResolver("none", 0)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.0.0.5:443"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	req.Header.Set("X-Real-IP", "203.0.113.9")
+	assert.Equal(t, "10.0.0.5", resolver.Resolve(req))
 }
 
-func TestRateLimiter_UsesForwardedForOnlyWhenTrusted(t *testing.T) {
-	rl := middleware.NewRateLimiter(
-		rate.Limit(1),
-		1,
-		middleware.WithTrustedProxyHeaders(true),
-	)
+func TestCloudflareResolverUsesConnectingIP(t *testing.T) {
+	resolver := middleware.NewIPResolver("cloudflare", 0)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "172.68.0.1:443"
+	req.Header.Set("CF-Connecting-IP", "198.51.100.7")
+	assert.Equal(t, "198.51.100.7", resolver.Resolve(req))
+}
 
-	handler := rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
+func TestKeyedLimiterEvictsLeastRecentlyUsedKeys(t *testing.T) {
+	limiter := middleware.NewKeyedLimiter(rate.Limit(1), 1, 3)
+	for i := range 10 {
+		ok, _ := limiter.Allow("ip-" + strconv.Itoa(i))
+		require.True(t, ok)
+	}
+	assert.Equal(t, 3, limiter.Len())
+}
 
-	req1 := httptest.NewRequest(http.MethodGet, "/", nil)
-	req1.RemoteAddr = "10.0.0.1:1111"
-	req1.Header.Set("X-Forwarded-For", "203.0.113.1")
-	rr1 := httptest.NewRecorder()
-	handler.ServeHTTP(rr1, req1)
-	assert.Equal(t, http.StatusOK, rr1.Code)
+func TestLimitBytesChargesContentLength(t *testing.T) {
+	limiter := middleware.NewKeyedLimiter(rate.Limit(1), 10, 100)
+	handler := middleware.LimitBytes(limiter, func(*http.Request) string { return "user" })(okHandler())
+	send := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+	assert.Equal(t, http.StatusOK, send("12345678").Code)
+	assert.Equal(t, http.StatusTooManyRequests, send("12345678").Code)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, send(strings.Repeat("x", 11)).Code)
+}
 
-	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
-	req2.RemoteAddr = "10.0.0.1:1111"
-	req2.Header.Set("X-Forwarded-For", "203.0.113.2")
-	rr2 := httptest.NewRecorder()
-	handler.ServeHTTP(rr2, req2)
-	assert.Equal(t, http.StatusOK, rr2.Code)
+func TestConcurrencyLimiterEnforcesGlobalAndPerKey(t *testing.T) {
+	limiter := middleware.NewConcurrencyLimiter(3, 2)
+	releaseA1, ok := limiter.Acquire("a")
+	require.True(t, ok)
+	_, ok = limiter.Acquire("a")
+	require.True(t, ok)
+	_, ok = limiter.Acquire("a")
+	require.False(t, ok)
+	_, ok = limiter.Acquire("b")
+	require.True(t, ok)
+	_, ok = limiter.Acquire("c")
+	require.False(t, ok)
+	releaseA1()
+	releaseA1()
+	_, ok = limiter.Acquire("c")
+	require.True(t, ok)
 }

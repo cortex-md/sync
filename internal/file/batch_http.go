@@ -16,11 +16,13 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+	"golang.org/x/sync/semaphore"
 )
 
 const (
-	BatchContentType  = "application/vnd.cortex.batch"
-	batchFetchWorkers = 8
+	BatchContentType   = "application/vnd.cortex.batch"
+	batchFetchWorkers  = 8
+	batchBytesInFlight = 16 << 20
 )
 
 type batchRequest struct {
@@ -75,10 +77,12 @@ func (h *Handler) BatchDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := make([]chan fetchedBlob, len(plan.Entries))
+	weights := make([]int64, len(plan.Entries))
 	for i := range results {
 		results[i] = make(chan fetchedBlob, 1)
 	}
-	sem := make(chan struct{}, batchFetchWorkers)
+	workers := make(chan struct{}, batchFetchWorkers)
+	inFlight := semaphore.NewWeighted(batchBytesInFlight)
 	ctx := r.Context()
 	go func() {
 		for i, entry := range plan.Entries {
@@ -86,14 +90,20 @@ func (h *Handler) BatchDownload(w http.ResponseWriter, r *http.Request) {
 				results[i] <- fetchedBlob{}
 				continue
 			}
+			weight := min(max(entry.Snapshot.SizeBytes, 1), batchBytesInFlight)
+			if err := inFlight.Acquire(ctx, weight); err != nil {
+				results[i] <- fetchedBlob{err: err}
+				continue
+			}
+			weights[i] = weight
 			select {
-			case sem <- struct{}{}:
+			case workers <- struct{}{}:
 			case <-ctx.Done():
 				results[i] <- fetchedBlob{err: ctx.Err()}
 				continue
 			}
 			go func(entry BatchEntry, out chan<- fetchedBlob) {
-				defer func() { <-sem }()
+				defer func() { <-workers }()
 				out <- fetchBlob(ctx, plan, entry)
 			}(entry, results[i])
 		}
@@ -111,7 +121,11 @@ func (h *Handler) BatchDownload(w http.ResponseWriter, r *http.Request) {
 		if header.Status != "ok" {
 			body = nil
 		}
-		if err := writeFrame(out, header, body); err != nil {
+		err := writeFrame(out, header, body)
+		if weights[i] > 0 {
+			inFlight.Release(weights[i])
+		}
+		if err != nil {
 			log.Debug().Err(err).Msg("batch download aborted by client")
 			return
 		}

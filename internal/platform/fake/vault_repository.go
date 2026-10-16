@@ -116,6 +116,14 @@ func (r *VaultRepository) GetByID(_ context.Context, id uuid.UUID) (*domain.Vaul
 	return &result, nil
 }
 
+func (r *VaultRepository) ReconcileStorage(_ context.Context) (int64, error) {
+	return 0, nil
+}
+
+func (r *VaultRepository) GetForUpdate(ctx context.Context, id uuid.UUID) (*domain.Vault, error) {
+	return r.GetByID(ctx, id)
+}
+
 func (r *VaultRepository) ListByUserID(_ context.Context, userID uuid.UUID) ([]domain.Vault, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -519,7 +527,7 @@ func (r *VaultInviteRepository) ListPendingByVault(_ context.Context, vaultID uu
 	defer r.mu.RUnlock()
 	var result []domain.VaultInvite
 	for _, inv := range r.invites {
-		if inv.VaultID == vaultID && !inv.Accepted {
+		if inv.VaultID == vaultID && !inv.Accepted && time.Now().Before(inv.ExpiresAt) {
 			result = append(result, *inv)
 		}
 	}

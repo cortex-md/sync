@@ -363,6 +363,17 @@ In `cluster` mode:
 - Polling fallback: `GET /sync/v1/vaults/{vaultID}/changes?since=<event_id>`
 - File events are filtered by the caller's scope; guests only get member/key events about themselves
 
+## API docs
+
+- `internal/apidocs/openapi.yaml` is the OpenAPI 3.1 contract, embedded in the binary and served at
+  `/docs/openapi.yaml`; `/docs` is Swagger UI loaded from jsDelivr with a pinned version and SRI
+  hashes under a strict CSP. Both are always mounted.
+- `TestOpenAPISpecDocumentsEveryRoute` walks the real router: every new or removed route must be
+  added to or removed from the spec in the same change.
+- Each package has a `contract_test.go` (`apidocstest.AssertMatches`) that compares the JSON tags of
+  its request/response structs with the matching `components.schemas` entry. Adding, renaming or
+  removing a JSON field fails CI until the spec is updated; register new structs there too.
+
 ## Testing
 
 ```bash

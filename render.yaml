@@ -3,7 +3,7 @@ services:
     name: cortex-sync
     runtime: docker
     plan: free
-    region: virginia
+    region: ohio
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health
     autoDeployTrigger: checksPass
